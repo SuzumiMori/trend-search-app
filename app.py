@@ -12,7 +12,7 @@ import pydeck as pdk
 st.set_page_config(page_title="トレンド・イベント検索", page_icon="🗺️")
 
 st.title("🗺️ トレンド・イベントMap検索")
-st.markdown("指定した期間・地域の情報をAIが検索し、高機能マップとリストで表示します。")
+st.markdown("信頼できる情報ソース（Fashion Press, PR TIMES等）に限定して検索します。")
 
 # --- サイドバー: 設定エリア ---
 with st.sidebar:
@@ -44,22 +44,25 @@ if st.button("検索開始", type="primary"):
         # 検索処理
         client = genai.Client(api_key=api_key)
         status_text = st.empty()
-        status_text.info(f"🔍 {region}周辺の情報を収集中... (公式サイトや個別記事を特定中)")
+        status_text.info(f"🔍 {region}周辺の情報を収集中... (信頼できるメディアのみを検索中)")
 
-        # 検索範囲
+        # 検索範囲（月単位）
         search_months = f"{start_date.year}年{start_date.month}月"
         if start_date.month != end_date.month:
             search_months += f"、{end_date.year}年{end_date.month}月"
 
-        # プロンプト (個別URL取得のための厳格な指示)
-        prompt = f"""
-        あなたは優秀なトレンドリサーチャーです。
-        以下のキーワードでGoogle検索し、指定期間のイベント情報を抽出してください。
+        # ★ここがポイント：検索対象ドメインを指定
+        trusted_sites = "site:fashion-press.net OR site:prtimes.jp OR site:walkerplus.com OR site:timeout.jp OR site:entabe.jp OR site:event-checker.info"
 
-        【検索キーワード】
-        「{region} イベント {search_months}」
-        「{region} 新店 オープン {search_months}」
-        「{region} 限定メニュー {search_months}」
+        # プロンプト
+        prompt = f"""
+        あなたは厳格なトレンドリサーチャーです。
+        以下の「信頼できるサイト」のみを対象にGoogle検索を行い、正確なイベント情報を抽出してください。
+        
+        【検索クエリの指示】
+        以下のキーワードで検索してください：
+        「{region} イベント {search_months} {trusted_sites}」
+        「{region} 新規オープン {search_months} {trusted_sites}」
 
         【ユーザー指定期間】
         {start_date} から {end_date} まで
@@ -74,24 +77,22 @@ if st.button("検索開始", type="primary"):
                 "start_date": "YYYY-MM-DD",
                 "end_date": "YYYY-MM-DD",
                 "description": "概要",
-                "source_name": "情報のソース元サイト名(例: PR TIMES, 公式サイト, Fashion Press)",
-                "url": "その情報の具体的な個別URL",
+                "source_name": "サイト名(例: Fashion Press)",
+                "url": "記事のURL",
                 "lat": 緯度(数値),
                 "lon": 経度(数値)
             }},
             ...
         ]
 
-        【重要：URL選定の絶対ルール】
-        1. **「まとめサイトのトップページ」や「イベント一覧ページ」のURLは禁止です。**
-           (例: timeout.com/tokyo/things-to-do などの包括的なURLは不可)
-        2. 必ず**「そのお店/イベント単体の公式ページ」**か**「具体的なプレスリリース/ニュース記事」**のURLを探して設定してください。
-        3. 同じURLを複数の項目で使い回さないでください。
-        4. どうしても個別URLが見つからない場合のみ、詳細が書かれているまとめ記事の個別ページを許可します。
+        【絶対ルール】
+        1. **指定した信頼できるサイト(Fashion Press, PR TIMES等)の情報のみを採用してください。** 怪しいブログやまとめサイトは無視してください。
+        2. **URLは検索結果に出てきた実在するものをそのままコピーしてください。** 自分で推測してURLを作らないでください（リンク切れの原因になります）。
+        3. 昨年の記事（2023年など）は絶対に除外してください。
 
         【条件】
         - 5件程度抽出してください。
-        - 昨年の情報は除外してください。
+        - 万が一情報が見つからない場合は、無理に捏造せず、見つかった件数だけで出力してください。
         """
 
         try:
@@ -124,9 +125,9 @@ if st.button("検索開始", type="primary"):
                             data = json.loads(candidate)
                 except:
                     pass
-
+            
             if not data:
-                st.error("情報をうまく抽出できませんでした。条件を変えてもう一度試してみてください。")
+                st.warning("条件に合う情報が見つかりませんでした。期間や地域を変更して再度お試しください。")
                 st.stop()
 
             # --- 期間表示用の整形処理 ---
@@ -205,15 +206,14 @@ if st.button("検索開始", type="primary"):
             # --- 2. 速報テキストリスト ---
             st.markdown("---")
             st.subheader("📋 イベント情報一覧")
-            st.caption("※リンク先で詳細をご確認ください。")
+            st.caption("※信頼できるメディア（Fashion Press等）の記事へのリンクです。")
             
             for item in data:
                 url_text = "なし"
-                source_label = item.get('source_name', 'Webサイト') # サイト名を取得
+                source_label = item.get('source_name', '詳細記事')
                 
                 if item.get('url'):
-                    # リンクテキストを「🔗 サイト名で確認」にする
-                    url_text = f"[🔗 {source_label} で確認]({item.get('url')})"
+                    url_text = f"[🔗 {source_label} で記事を読む]({item.get('url')})"
 
                 st.markdown(f"""
                 - **期間**: {item.get('display_date')}
