@@ -6,12 +6,13 @@ import os
 import json
 import pandas as pd
 import re
+import pydeck as pdk # 高機能な地図用のライブラリ
 
 # ページの設定
 st.set_page_config(page_title="トレンド・イベント検索", page_icon="🗺️")
 
 st.title("🗺️ トレンド・イベントMap検索")
-st.markdown("指定した期間・地域の情報をAIが検索し、地図とテキストで表示します。")
+st.markdown("指定した期間・地域の情報をAIが検索し、高機能マップとリストで表示します。")
 
 # --- サイドバー: 設定エリア ---
 with st.sidebar:
@@ -43,9 +44,9 @@ if st.button("検索開始", type="primary"):
         # 検索処理
         client = genai.Client(api_key=api_key)
         status_text = st.empty()
-        status_text.info(f"🔍 {region}周辺の情報を収集中... 地図とリストを作成しています...")
+        status_text.info(f"🔍 {region}周辺の情報を収集中... 詳細な期間情報と地図データを作成中...")
 
-        # プロンプト (取得項目に「type」と「place」を追加)
+        # プロンプト (start_date, end_date を分離して要求)
         prompt = f"""
         あなたはトレンドリサーチャーです。
         【{region}】における、【{start_date}】から【{end_date}】までの期間の以下の情報を、Google検索を使って調べてください。
@@ -57,15 +58,18 @@ if st.button("検索開始", type="primary"):
 
         【出力形式（超重要）】
         結果は**必ず以下のJSON形式のリストのみ**を出力してください。
-        Markdownの装飾（```json）や前置きは不要です。
-        各アイテムには、以下の情報を必ず含めてください。
+        Markdownの装飾や前置きは不要です。
+        
+        期間については、「開始日(start_date)」と「終了日(end_date)」を分けてください。
+        1日だけのイベントや発売日の場合は、start_date と end_date に同じ日付を入れてください。
 
         [
             {{
                 "type": "種別(新メニュー/オープン/イベント)",
                 "name": "店名またはイベント名",
                 "place": "具体的な場所・施設名",
-                "date": "開催日または発売日(YYYY-MM-DD)",
+                "start_date": "YYYY-MM-DD",
+                "end_date": "YYYY-MM-DD",
                 "description": "概要（特徴を簡潔に）",
                 "url": "関連する公式URLなど（あれば）",
                 "lat": 緯度(数値),
@@ -100,7 +104,7 @@ if st.button("検索開始", type="primary"):
             try:
                 data = json.loads(text)
             except json.JSONDecodeError as e:
-                # エラーリカバリー（前回と同じ頑丈なロジック）
+                # エラーリカバリー
                 try:
                     if e.msg.startswith("Extra data"):
                         data = json.loads(text[:e.pos])
@@ -121,36 +125,78 @@ if st.button("検索開始", type="primary"):
                     st.error("データの読み込みに失敗しました。")
                     st.stop()
 
+            # --- 期間表示用の整形処理 ---
+            # データに「display_date」という新しい項目を追加します
+            for item in data:
+                s_date = item.get('start_date')
+                e_date = item.get('end_date')
+                if s_date and e_date:
+                    if s_date == e_date:
+                        item['display_date'] = s_date # 単発
+                    else:
+                        item['display_date'] = f"{s_date} 〜 {e_date}" # 期間
+                else:
+                    item['display_date'] = s_date or "日付不明"
+
             # データフレーム変換
             df = pd.DataFrame(data)
 
-            # --- 1. 地図の表示 ---
+            # --- 1. 高機能地図の表示 (PyDeck) ---
             st.subheader(f"📍 {region}周辺のイベントマップ")
+            
             if not df.empty and 'lat' in df.columns and 'lon' in df.columns:
                 map_df = df.dropna(subset=['lat', 'lon'])
-                st.map(map_df, size=20, color='#FF4B4B')
+                
+                # 地図の設定
+                view_state = pdk.ViewState(
+                    latitude=map_df['lat'].mean(),
+                    longitude=map_df['lon'].mean(),
+                    zoom=13,
+                    pitch=0,
+                )
+
+                # レイヤーの設定（赤い点＋ツールチップ）
+                layer = pdk.Layer(
+                    "ScatterplotLayer",
+                    map_df,
+                    get_position='[lon, lat]',
+                    get_color='[255, 75, 75, 160]', # 赤色, 透明度あり
+                    get_radius=200, # 半径(メートル)
+                    pickable=True,  # マウスオーバーを有効にする
+                )
+
+                # 地図のレンダリング
+                st.pydeck_chart(pdk.Deck(
+                    map_style='mapbox://styles/mapbox/light-v9', # 明るい地図
+                    initial_view_state=view_state,
+                    layers=[layer],
+                    tooltip={
+                        "html": "<b>{name}</b><br/>{place}<br/><i>{description}</i>",
+                        "style": {"backgroundColor": "steelblue", "color": "white"}
+                    }
+                ))
+                st.caption("※地図上の赤い丸にマウスを乗せると詳細が表示されます。")
             else:
                 st.warning("地図データが取得できませんでした。")
 
-            # --- 2. 速報リスト（昨日の形式）を追加！ ---
+            # --- 2. 速報テキストリスト（期間表示に対応） ---
             st.markdown("---")
             st.subheader("📋 速報テキストリスト")
             
             for item in data:
-                # 昨日のような箇条書きスタイルで出力
                 st.markdown(f"""
-                - **種別**: {item.get('type', '情報')}
+                - **期間**: {item.get('display_date')}
+                - **種別**: {item.get('type')}
                 - **店名/イベント名**: {item.get('name')}
-                - **場所**: {item.get('place', region)}
+                - **場所**: {item.get('place')}
                 - **概要**: {item.get('description')}
-                - **日付**: {item.get('date')}
                 """)
 
-            # --- 3. 詳細リスト（既存の折りたたみ） ---
+            # --- 3. 詳細リスト ---
             st.markdown("---")
             st.subheader("📝 詳細・リンク")
             for item in data:
-                with st.expander(f"{item.get('date', '')} : {item.get('name', '名称不明')}"):
+                with st.expander(f"{item.get('display_date')} : {item.get('name', '名称不明')}"):
                     st.write(f"**種別**: {item.get('type', '')}")
                     st.write(f"**場所**: {item.get('place', '')}")
                     st.write(f"**概要**: {item.get('description', '')}")
