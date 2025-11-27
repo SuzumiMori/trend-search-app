@@ -14,7 +14,7 @@ import time
 st.set_page_config(page_title="トレンド・イベント検索", page_icon="🗺️")
 
 st.title("🗺️ トレンド・イベントMap検索")
-st.markdown("信頼できる情報サイト（Walkerplus, Go Tokyo等）の記事を検索し、イベント情報を抽出します。")
+st.markdown("「2025年以降」に更新された記事のみを対象に、最新のイベント情報を抽出します。")
 
 # --- サイドバー: 設定エリア ---
 with st.sidebar:
@@ -41,7 +41,7 @@ with st.sidebar:
         default=["Fashion Press (ニュース)", "Walkerplus (イベント記事)", "Let's Enjoy Tokyo (イベント)"]
     )
     
-    st.info("💡 最新のGemini 2.0モデルを使用します。")
+    st.info("💡 検索コマンド `after:2025-01-01` を使用し、古い情報を物理的に除外します。")
 
 # --- メインエリア ---
 
@@ -60,7 +60,7 @@ if st.button("検索開始", type="primary"):
     progress_bar = st.progress(0)
     status_text = st.empty()
 
-    status_text.info("🚀 検索エンジンを起動中...")
+    status_text.info("🚀 検索エンジンを起動中... (古い記事の除外設定中)")
     time.sleep(1)
     progress_bar.progress(10)
     
@@ -70,23 +70,27 @@ if st.button("検索開始", type="primary"):
     # 検索クエリ作成
     site_query = " OR ".join([f"site:{path}" for path in target_paths])
     today = datetime.date.today()
+    
+    # ★ここが最大の修正点: after:2025-01-01 を追加
+    # これにより、2024年以前の記事は検索結果から消滅します
+    date_filter = f"after:{today.year}-01-01" 
 
     # プロンプト
     prompt = f"""
-    あなたは「イベント情報の収集ロボット」です。
-    Google検索を行い、以下の条件に合致する**個別のイベント記事**から情報を抽出してください。
+    あなたは「Google検索結果の抽出ボット」です。
+    以下の検索クエリを実行し、結果に含まれる**今年開催のイベント情報**を抽出してください。
 
     【検索クエリ】
-    「{region} イベント 開催中 {site_query}」
-    「{region} 新規オープン 決定 {site_query}」
+    「{region} イベント 開催中 {site_query} {date_filter}」
+    「{region} 新規オープン 決定 {site_query} {date_filter}」
 
     【基準日】
     本日は {today} です。終了済みのイベントは除外してください。
 
     【厳守ルール】
-    1. **実在する記事のみ**: 検索結果に出てきた記事（Webページ）を1件のイベントとして扱ってください。
-    2. **URL**: 検索結果の**記事URL**をそのまま使用してください。自分でURLを作ったり、トップページを入れたりしないでください。
-    3. **件数**: 検索結果から可能な限り多く（最大20件）抽出してください。
+    1. **日付の厳格化**: 記事の日付が2025年以降であることを確認してください。2022年や2023年の情報は絶対に含めないでください。
+    2. **URLの完全コピー**: 検索結果に表示されている**URL（Source Link）**をそのまま使用してください。自分でURLを推測したり書き換えたりすることは**禁止**です。
+    3. **実在性**: 記事のタイトルとスニペットにある情報だけで構成してください。
 
     【出力形式（JSONのみ）】
     [
@@ -96,14 +100,14 @@ if st.button("検索開始", type="primary"):
             "date_info": "期間(例: 11/1〜12/25)",
             "description": "概要(短くてOK)",
             "source_name": "サイト名",
-            "url": "記事のURL",
+            "url": "検索結果のURLをそのまま貼る",
             "lat": 緯度(数値・不明ならnull),
             "lon": 経度(数値・不明ならnull)
         }}
     ]
     """
 
-    # ★再試行ロジック付きの検索関数
+    # 検索実行関数（リトライ機能付き）
     def execute_search_with_retry(model_name):
         max_retries = 3
         for attempt in range(max_retries):
@@ -118,32 +122,30 @@ if st.button("検索開始", type="primary"):
                     )
                 )
             except Exception as e:
-                # 429エラー（Resource Exhausted）なら待って再試行
                 if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
-                    wait_time = 5 * (attempt + 1) # 5秒, 10秒, 15秒と待つ
+                    wait_time = 5 * (attempt + 1)
                     status_text.warning(f"⚠️ アクセス集中... {wait_time}秒待機して再試行します({attempt+1}/{max_retries})")
                     time.sleep(wait_time)
                     continue
                 else:
-                    # その他のエラーはそのまま投げる
                     raise e
-        raise Exception("通信が混雑しており接続できませんでした。時間を置いて再度お試しください。")
+        raise Exception("通信エラー")
 
     # STEP 2: 検索実行
-    status_text.info(f"🔍 {region}周辺の情報を検索中... (Gemini 2.0 Flash)")
+    status_text.info(f"🔍 {region}周辺の情報を検索中... (2025年以降の記事のみ)")
     progress_bar.progress(30)
 
     response = None
     
     try:
-        # ★ここで gemini-2.0-flash-exp を使用
+        # gemini-2.0-flash-exp を使用
         response = execute_search_with_retry("gemini-2.0-flash-exp")
     except Exception as e:
         st.error(f"エラーが発生しました: {e}")
         st.stop()
 
     # STEP 3: データの解析
-    status_text.info("📝 取得した記事データの整合性とURLをチェック中...")
+    status_text.info("📝 データの整合性とURLをチェック中...")
     progress_bar.progress(80)
 
     # --- JSONデータの抽出 ---
@@ -176,6 +178,7 @@ if st.button("検索開始", type="primary"):
         is_valid = False
         if url and url.startswith("http"):
             for path in target_paths:
+                # ドメインチェック
                 check_domain = path.split('/')[0] 
                 if check_domain in url:
                     is_valid = True
@@ -183,6 +186,7 @@ if st.button("検索開始", type="primary"):
         
         # 幻覚URLブロック
         if "kanko.walkerplus" in url: is_valid = False
+        if "/words/" in url: is_valid = False # 用語集ブロック
 
         if not is_valid:
             search_query = f"{item['name']} {item['place']} イベント"
