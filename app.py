@@ -12,7 +12,7 @@ import pydeck as pdk
 st.set_page_config(page_title="トレンド・イベント検索", page_icon="🗺️")
 
 st.title("🗺️ トレンド・イベントMap検索")
-st.markdown("信頼できる情報ソース（Fashion Press, PR TIMES等）に限定して検索します。")
+st.markdown("信頼できる情報ソースから、**実在が確認された情報のみ**を表示します。")
 
 # --- サイドバー: 設定エリア ---
 with st.sidebar:
@@ -23,6 +23,7 @@ with st.sidebar:
     st.markdown("---")
     
     st.markdown("### 📅 期間指定")
+    st.caption("※期間を短くしすぎると情報が見つからない場合があります。自動的にその月全体の情報を検索し、近いものを表示します。")
     today = datetime.date.today()
     next_month = today + datetime.timedelta(days=30)
     
@@ -44,71 +45,69 @@ if st.button("検索開始", type="primary"):
         # 検索処理
         client = genai.Client(api_key=api_key)
         status_text = st.empty()
-        status_text.info(f"🔍 {region}周辺の情報を収集中... (信頼できるメディアのみを検索中)")
+        
+        # ★ここが改良点: 検索対象を「ピンポイントの日付」から「月単位」に自動拡大する
+        # ユーザーが「11/29」を指定しても、検索は「2025年11月」全体で行うことでヒット率を高める
+        search_months = set()
+        search_months.add(f"{start_date.year}年{start_date.month}月")
+        search_months.add(f"{end_date.year}年{end_date.month}月")
+        search_months_str = " ".join(search_months) # 例: "2025年11月 2025年12月"
 
-        # 検索範囲（月単位）
-        search_months = f"{start_date.year}年{start_date.month}月"
-        if start_date.month != end_date.month:
-            search_months += f"、{end_date.year}年{end_date.month}月"
+        status_text.info(f"🔍 {region}周辺の情報を収集中... (ヒット率を上げるため {search_months_str} の情報を広く探しています)")
 
-        # ★ここがポイント：検索対象ドメインを指定
+        # 信頼できるサイトドメイン
         trusted_sites = "site:fashion-press.net OR site:prtimes.jp OR site:walkerplus.com OR site:timeout.jp OR site:entabe.jp OR site:event-checker.info"
 
-        # プロンプト
+        # プロンプト (ロボットモード)
         prompt = f"""
-        あなたは厳格なトレンドリサーチャーです。
-        以下の「信頼できるサイト」のみを対象にGoogle検索を行い、正確なイベント情報を抽出してください。
-        
-        【検索クエリの指示】
-        以下のキーワードで検索してください：
-        「{region} イベント {search_months} {trusted_sites}」
-        「{region} 新規オープン {search_months} {trusted_sites}」
+        あなたは「Web検索結果からのデータ抽出ロボット」です。創作能力はありません。
+        以下の検索クエリでGoogle検索を行い、実在するイベント情報だけを抽出してください。
 
-        【ユーザー指定期間】
+        【検索クエリ】
+        「{region} イベント {search_months_str} {trusted_sites}」
+        「{region} 新規オープン {search_months_str} {trusted_sites}」
+
+        【ユーザーの希望期間】
         {start_date} から {end_date} まで
 
+        【厳守ルール】
+        1. **検索結果にないイベントを絶対に創作しないでください。** 情報が少なければ、無理に5件埋めなくて構いません。
+        2. **URLは検索結果のものをそのまま使用してください。**
+        3. **期間の許容:** ユーザーの希望期間にドンピシャの情報がない場合でも、「その月({search_months_str})」に開催されるイベントであれば候補として抽出してください。
+        4. 昨年の情報（2023年など）は除外してください。
+
         【出力形式（JSONのみ）】
-        Markdown装飾不要。以下のJSONリストのみ出力してください。
         [
             {{
-                "type": "種別(新メニュー/オープン/イベント)",
+                "type": "種別",
                 "name": "店名またはイベント名",
                 "place": "具体的な場所",
                 "start_date": "YYYY-MM-DD",
                 "end_date": "YYYY-MM-DD",
                 "description": "概要",
-                "source_name": "サイト名(例: Fashion Press)",
+                "source_name": "サイト名",
                 "url": "記事のURL",
                 "lat": 緯度(数値),
                 "lon": 経度(数値)
-            }},
-            ...
+            }}
         ]
-
-        【絶対ルール】
-        1. **指定した信頼できるサイト(Fashion Press, PR TIMES等)の情報のみを採用してください。** 怪しいブログやまとめサイトは無視してください。
-        2. **URLは検索結果に出てきた実在するものをそのままコピーしてください。** 自分で推測してURLを作らないでください（リンク切れの原因になります）。
-        3. 昨年の記事（2023年など）は絶対に除外してください。
-
-        【条件】
-        - 5件程度抽出してください。
-        - 万が一情報が見つからない場合は、無理に捏造せず、見つかった件数だけで出力してください。
         """
 
         try:
-            # AIにリクエスト
+            # AIにリクエスト (temperature=0.0 で嘘を抑制)
             response = client.models.generate_content(
                 model="gemini-2.0-flash",
                 contents=prompt,
                 config=types.GenerateContentConfig(
                     tools=[types.Tool(google_search=types.GoogleSearch())],
-                    response_mime_type="application/json"
+                    response_mime_type="application/json",
+                    temperature=0.0 
                 )
             )
 
             status_text.empty()
             
-            # --- JSONデータの抽出・修復ロジック ---
+            # --- JSONデータの抽出 ---
             text = response.text.replace("```json", "").replace("```", "").strip()
             data = []
             
@@ -126,8 +125,10 @@ if st.button("検索開始", type="primary"):
                 except:
                     pass
             
+            # データが空だった場合
             if not data:
-                st.warning("条件に合う情報が見つかりませんでした。期間や地域を変更して再度お試しください。")
+                st.warning(f"⚠️ {region} エリアの指定期間における、信頼できるソースからの情報は現在見つかりませんでした。")
+                st.info("💡 ヒント: まだ情報が公開されていないか、エリアを広げると見つかる可能性があります。")
                 st.stop()
 
             # --- 期間表示用の整形処理 ---
@@ -145,7 +146,7 @@ if st.button("検索開始", type="primary"):
             # データフレーム変換
             df = pd.DataFrame(data)
 
-            # --- 1. 高機能地図の表示 (Voyagerスタイル) ---
+            # --- 1. 高機能地図 (Voyager) ---
             st.subheader(f"📍 {region}周辺のイベントマップ")
             
             if not df.empty and 'lat' in df.columns and 'lon' in df.columns:
@@ -206,7 +207,7 @@ if st.button("検索開始", type="primary"):
             # --- 2. 速報テキストリスト ---
             st.markdown("---")
             st.subheader("📋 イベント情報一覧")
-            st.caption("※信頼できるメディア（Fashion Press等）の記事へのリンクです。")
+            st.caption("※AIの自動抽出情報です。リンク先で詳細をご確認ください。")
             
             for item in data:
                 url_text = "なし"
