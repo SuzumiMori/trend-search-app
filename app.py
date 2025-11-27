@@ -5,7 +5,7 @@ from google.genai import types
 import os
 import json
 import pandas as pd
-import re # 追加：正規表現を使うためのライブラリ
+import re
 
 # ページの設定
 st.set_page_config(page_title="トレンド・イベント検索", page_icon="🗺️")
@@ -16,14 +16,11 @@ st.markdown("指定した期間・地域の情報をAIが検索し、地図と�
 # --- サイドバー: 設定エリア ---
 with st.sidebar:
     st.header("検索条件")
-    
-    # 地域の設定
     st.markdown("### 📍 地域・場所")
     region = st.text_input("検索したい場所", value="東京都渋谷区", help="地図を表示するため、なるべく具体的な地名（例：梅田、吉祥寺、横浜みなとみらい）がおすすめです。")
 
     st.markdown("---")
     
-    # 期間の設定
     st.markdown("### 📅 期間指定")
     today = datetime.date.today()
     next_month = today + datetime.timedelta(days=30)
@@ -34,7 +31,6 @@ with st.sidebar:
 # --- メインエリア ---
 
 if st.button("検索開始", type="primary"):
-    # SecretsからAPIキーを読み込む
     try:
         api_key = st.secrets["GOOGLE_API_KEY"]
     except:
@@ -46,11 +42,10 @@ if st.button("検索開始", type="primary"):
     else:
         # 検索処理
         client = genai.Client(api_key=api_key)
-        
         status_text = st.empty()
         status_text.info(f"🔍 {region}周辺の情報を収集中... 地図データも作成しています...")
 
-        # プロンプト (JSON出力を強制し、緯度経度を要求)
+        # プロンプト
         prompt = f"""
         あなたはトレンドリサーチャーです。
         【{region}】における、【{start_date}】から【{end_date}】までの期間の以下の情報を、Google検索を使って調べてください。
@@ -62,7 +57,7 @@ if st.button("検索開始", type="primary"):
 
         【出力形式（超重要）】
         結果は**必ず以下のJSON形式のリストのみ**を出力してください。
-        Markdownの装飾や、「結果はこちらです」などの前置きは一切不要です。
+        Markdownの装飾（```json）や前置きは不要です。
         各アイテムには、その場所のおおよその緯度(lat)と経度(lon)を必ず含めてください。
 
         [
@@ -90,55 +85,74 @@ if st.button("検索開始", type="primary"):
                 contents=prompt,
                 config=types.GenerateContentConfig(
                     tools=[types.Tool(google_search=types.GoogleSearch())],
-                    response_mime_type="application/json" # JSONモードを強制
+                    response_mime_type="application/json"
                 )
             )
 
-            # 結果の処理
             status_text.empty()
             
-            # ★ここを修正：頑丈なJSON抽出ロジック
-            try:
-                text = response.text
-                # 文字列の中から [ ... ] の部分だけを探し出す
-                match = re.search(r'\[.*\]', text, re.DOTALL)
-                
-                if match:
-                    json_str = match.group(0)
-                    data = json.loads(json_str)
-                else:
-                    # 見つからない場合はそのままトライ
-                    data = json.loads(text)
-                
-                # データフレーム（表）に変換
-                df = pd.DataFrame(data)
-
-                # --- 1. 地図の表示 ---
-                st.subheader(f"📍 {region}周辺のイベントマップ")
-                
-                # 緯度経度データがあるかチェックして地図表示
-                if not df.empty and 'lat' in df.columns and 'lon' in df.columns:
-                    # 欠損値を除去して地図表示
-                    map_df = df.dropna(subset=['lat', 'lon'])
-                    st.map(map_df, size=20, color='#FF4B4B')
-                else:
-                    st.warning("地図データ（緯度・経度）が取得できませんでした。リストのみ表示します。")
-
-                # --- 2. リスト詳細の表示 ---
-                st.subheader("📝 イベント詳細リスト")
-                for item in data:
-                    with st.expander(f"{item.get('date', '')} : {item.get('name', '名称不明')}"):
-                        st.write(f"**概要**: {item.get('description', '')}")
-                        if item.get('url'):
-                            st.markdown(f"[🔗 公式情報・関連リンク]({item.get('url')})")
+            # --- JSONデータの抽出・修復ロジック ---
+            text = response.text.replace("```json", "").replace("```", "").strip()
+            data = []
             
-            except Exception as parse_error:
-                st.error("AIからのデータの読み込みに失敗しました。")
-                st.write("▼ 原因調査用データ（AIの出力）")
-                st.code(response.text) # どんなデータが返ってきたか表示する
-                st.error(f"エラー詳細: {parse_error}")
+            try:
+                # そのまま変換を試みる
+                data = json.loads(text)
+            except json.JSONDecodeError as e:
+                # 失敗した場合のリカバリー
+                try:
+                    # パターンA: "Extra data" (JSONの後ろにゴミがある)
+                    if e.msg.startswith("Extra data"):
+                        # エラー発生位置(e.pos)までが正しいデータなので、そこで切り取る
+                        valid_json = text[:e.pos]
+                        data = json.loads(valid_json)
+                    
+                    # パターンB: 前後に余計な文字がある場合 (正規表現で [ ... ] を探す)
+                    else:
+                        match = re.search(r'\[.*\]', text, re.DOTALL)
+                        if match:
+                            candidate = match.group(0)
+                            # 正規表現で取り出した後、再度 "Extra data" チェックを行う
+                            try:
+                                data = json.loads(candidate)
+                            except json.JSONDecodeError as e2:
+                                if e2.msg.startswith("Extra data"):
+                                    data = json.loads(candidate[:e2.pos])
+                                else:
+                                    raise e2 # どうしても無理
+                        else:
+                            raise e # [ ] が見つからない
+                            
+                except Exception as final_error:
+                    st.error("データの読み込みに失敗しました。")
+                    with st.expander("詳細エラー"):
+                        st.write(final_error)
+                        st.text("▼ AIからの生の返答")
+                        st.code(text)
+                    st.stop()
 
-            # 参照元リンク（Grounding）
+            # --- ここまで来れば data には正しいリストが入っているはず ---
+            
+            # データフレーム変換
+            df = pd.DataFrame(data)
+
+            # 1. 地図の表示
+            st.subheader(f"📍 {region}周辺のイベントマップ")
+            if not df.empty and 'lat' in df.columns and 'lon' in df.columns:
+                map_df = df.dropna(subset=['lat', 'lon'])
+                st.map(map_df, size=20, color='#FF4B4B')
+            else:
+                st.warning("地図データ（緯度・経度）が取得できませんでした。リストのみ表示します。")
+
+            # 2. リスト詳細の表示
+            st.subheader("📝 イベント詳細リスト")
+            for item in data:
+                with st.expander(f"{item.get('date', '')} : {item.get('name', '名称不明')}"):
+                    st.write(f"**概要**: {item.get('description', '')}")
+                    if item.get('url'):
+                        st.markdown(f"[🔗 公式情報・関連リンク]({item.get('url')})")
+                        
+            # 参照元リンク
             with st.expander("📚 参考にしたWebページ"):
                 if response.candidates[0].grounding_metadata.grounding_chunks:
                     for chunk in response.candidates[0].grounding_metadata.grounding_chunks:
@@ -147,4 +161,4 @@ if st.button("検索開始", type="primary"):
 
         except Exception as e:
             status_text.empty()
-            st.error(f"エラーが発生しました: {e}")
+            st.error(f"予期せぬエラーが発生しました: {e}")
