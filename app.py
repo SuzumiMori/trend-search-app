@@ -9,33 +9,34 @@ import pydeck as pdk
 import requests
 from bs4 import BeautifulSoup
 import time
+import urllib.parse
 
 # ページの設定
 st.set_page_config(page_title="トレンド・イベント検索", page_icon="📖")
 
 st.title("📖 イベント情報「一括直読」抽出アプリ")
-st.markdown("複数のWebページを順番にAIが読み込み、情報を統合してリスト化します。")
+st.markdown("指定したWebページをAIが読み込み、情報を統合してリスト化します。")
 
 # --- サイドバー: 設定エリア ---
 with st.sidebar:
     st.header("読み込み対象 (複数選択可)")
     
-    # プリセットURLリスト
+    # プリセットURLリスト (URLを修正しました)
     PRESET_URLS = {
         "Walkerplus (今日のイベント/東京)": "https://www.walkerplus.com/event_list/today/ar0300/",
         "Walkerplus (今週末のイベント/東京)": "https://www.walkerplus.com/event_list/weekend/ar0300/",
         "Walkerplus (来週のイベント/東京)": "https://www.walkerplus.com/event_list/next_week/ar0300/",
-        "Let's Enjoy Tokyo (現在開催中/渋谷)": "https://www.enjoytokyo.jp/event/list/chi03/?date_type=current",
-        "Let's Enjoy Tokyo (今週末/渋谷)": "https://www.enjoytokyo.jp/event/list/chi03/?date_type=weekend",
+        "Let's Enjoy Tokyo (現在開催中/渋谷)": "https://www.enjoytokyo.jp/event/list/area1302/?date_type=current",
+        "Let's Enjoy Tokyo (今週末/渋谷)": "https://www.enjoytokyo.jp/event/list/area1302/?date_type=weekend",
         "Fashion Press (最新ニュース)": "https://www.fashion-press.net/news/",
         "TimeOut Tokyo (東京のイベント)": "https://www.timeout.jp/tokyo/ja/things-to-do"
     }
     
-    # マルチセレクトに変更
+    # マルチセレクト
     selected_presets = st.multiselect(
         "プリセットから選択",
         options=list(PRESET_URLS.keys()),
-        default=["Walkerplus (今日のイベント/東京)"]
+        default=["Walkerplus (今日のイベント/東京)", "Let's Enjoy Tokyo (現在開催中/渋谷)"]
     )
     
     st.markdown("---")
@@ -57,24 +58,29 @@ if st.button("一括読み込み開始", type="primary"):
         st.error("⚠️ APIキーが設定されていません。")
         st.stop()
 
-    # URLリストの作成
-    target_urls = []
+    # 処理対象リストの作成 [{"url": "...", "label": "..."}]
+    targets = []
     
     # プリセットから追加
     for label in selected_presets:
-        target_urls.append(PRESET_URLS[label])
+        targets.append({"url": PRESET_URLS[label], "label": label})
     
     # カスタム入力から追加
     if custom_urls_text:
         for url in custom_urls_text.split('\n'):
             url = url.strip()
             if url and url.startswith("http"):
-                target_urls.append(url)
+                # ドメイン名をラベルにする
+                domain = urllib.parse.urlparse(url).netloc
+                targets.append({"url": url, "label": f"カスタム ({domain})"})
     
-    # 重複除去
-    target_urls = list(set(target_urls))
+    # 重複URLの除去 (URLをキーにしてユニーク化)
+    unique_targets = {}
+    for t in targets:
+        unique_targets[t['url']] = t
+    targets = list(unique_targets.values())
 
-    if not target_urls:
+    if not targets:
         st.error("⚠️ URLが指定されていません。")
         st.stop()
 
@@ -85,20 +91,22 @@ if st.button("一括読み込み開始", type="primary"):
     progress_bar = st.progress(0)
     status_text = st.empty()
     
-    total_urls = len(target_urls)
+    total_urls = len(targets)
     
     # --- URLごとのループ処理 ---
-    for i, url in enumerate(target_urls):
+    for i, target in enumerate(targets):
+        url = target['url']
+        label = target['label']
+        
         current_progress = (i / total_urls)
         progress_bar.progress(current_progress)
-        status_text.info(f"⏳ ({i+1}/{total_urls}) ページを解析中... \n{url}")
+        status_text.info(f"⏳ ({i+1}/{total_urls}) 読み込み中...: {label}")
         
         try:
             # 1. スクレイピング
             headers = {
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
             }
-            # タイムアウトを少し長めに設定
             response = requests.get(url, headers=headers, timeout=15)
             response.encoding = response.apparent_encoding
             
@@ -120,8 +128,9 @@ if st.button("一括読み込み開始", type="primary"):
             あなたはデータ抽出アシスタントです。
             以下のWebページのテキストから「イベント情報」を抽出し、JSON形式でリスト化してください。
 
-            【ページURL】
-            {url}
+            【ページ情報】
+            URL: {url}
+            サイト名: {label}
 
             【テキスト内容】
             {page_text}
@@ -139,14 +148,13 @@ if st.button("一括読み込み開始", type="primary"):
                     "place": "開催場所",
                     "date_info": "期間",
                     "description": "概要(簡潔に)",
-                    "source_url": "{url}",
                     "lat": 緯度(数値),
                     "lon": 経度(数値)
                 }}
             ]
             """
 
-            # 安定動作のため gemini-2.0-flash-exp を使用
+            # gemini-2.0-flash-exp を使用
             ai_response = client.models.generate_content(
                 model="gemini-2.0-flash-exp",
                 contents=prompt,
@@ -160,15 +168,17 @@ if st.button("一括読み込み開始", type="primary"):
             text_resp = ai_response.text.replace("```json", "").replace("```", "").strip()
             extracted_list = json.loads(text_resp)
             
-            # 結果を統合リストに追加
+            # 結果を統合リストに追加 (ラベル情報を付与)
             if isinstance(extracted_list, list):
-                all_data.extend(extracted_list)
+                for item in extracted_list:
+                    item['source_label'] = label # ★ここを追加: 表示用ラベル
+                    item['source_url'] = url     # URL
+                    all_data.append(item)
             
-            # サーバー負荷軽減のため少し待機
             time.sleep(1)
 
         except Exception as e:
-            st.warning(f"⚠️ エラーが発生したためスキップしました: {url}\nエラー内容: {e}")
+            st.warning(f"⚠️ エラーが発生したためスキップしました: {label}\nエラー内容: {e}")
             continue
 
     # --- 完了処理 ---
@@ -230,10 +240,14 @@ if st.button("一括読み込み開始", type="primary"):
 
     # リスト表示
     for item in all_data:
+        # リンクテキストを「サイト名」にする
+        link_text = item.get('source_label', '情報元ページ')
+        link_url = item.get('source_url', '#')
+
         st.markdown(f"""
         - **期間**: {item.get('date_info')}
         - **イベント名**: {item.get('name')}
         - **場所**: {item.get('place')}
         - **概要**: {item.get('description')}
-        - [🔗 情報元ページへ]({item.get('source_url')})
+        - [🔗 {link_text} で確認]({link_url})
         """)
