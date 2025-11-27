@@ -14,7 +14,7 @@ import time
 st.set_page_config(page_title="トレンド・イベント検索", page_icon="🗺️")
 
 st.title("🗺️ トレンド・イベントMap検索")
-st.markdown("「2025年以降」に更新された記事のみを対象に、最新のイベント情報を抽出します。")
+st.markdown("主要メディアの記事から「期間限定イベント」や「新店情報」を抽出します。（施設自体の紹介は除外）")
 
 # --- サイドバー: 設定エリア ---
 with st.sidebar:
@@ -28,7 +28,6 @@ with st.sidebar:
     SITE_PATHS = {
         "Fashion Press (ニュース)": "fashion-press.net/news/",
         "Walkerplus (イベント記事)": "walkerplus.com/article/",
-        "Walkerplus (イベントリスト)": "walkerplus.com/event_list/",
         "Let's Enjoy Tokyo (イベント)": "enjoytokyo.jp/event/",
         "TimeOut Tokyo (ガイド)": "timeout.jp/tokyo/ja/things-to-do/",
         "PR TIMES (プレスリリース)": "prtimes.jp/main/html/rd/p/",
@@ -41,7 +40,7 @@ with st.sidebar:
         default=["Fashion Press (ニュース)", "Walkerplus (イベント記事)", "Let's Enjoy Tokyo (イベント)"]
     )
     
-    st.info("💡 検索コマンド `after:2025-01-01` を使用し、古い情報を物理的に除外します。")
+    st.info("💡 施設名だけの情報は自動的に除外されます。")
 
 # --- メインエリア ---
 
@@ -60,7 +59,7 @@ if st.button("検索開始", type="primary"):
     progress_bar = st.progress(0)
     status_text = st.empty()
 
-    status_text.info("🚀 検索エンジンを起動中... (古い記事の除外設定中)")
+    status_text.info("🚀 検索エンジンを起動中...")
     time.sleep(1)
     progress_bar.progress(10)
     
@@ -70,27 +69,27 @@ if st.button("検索開始", type="primary"):
     # 検索クエリ作成
     site_query = " OR ".join([f"site:{path}" for path in target_paths])
     today = datetime.date.today()
-    
-    # ★ここが最大の修正点: after:2025-01-01 を追加
-    # これにより、2024年以前の記事は検索結果から消滅します
-    date_filter = f"after:{today.year}-01-01" 
+    target_year = today.year
 
-    # プロンプト
+    # プロンプト (施設名除外の指示を強化)
     prompt = f"""
-    あなたは「Google検索結果の抽出ボット」です。
-    以下の検索クエリを実行し、結果に含まれる**今年開催のイベント情報**を抽出してください。
+    あなたは「イベント情報の収集ロボット」です。
+    Google検索を行い、以下の条件に合致する**具体的なイベント記事**から情報を抽出してください。
 
     【検索クエリ】
-    「{region} イベント 開催中 {site_query} {date_filter}」
-    「{region} 新規オープン 決定 {site_query} {date_filter}」
+    「{region} イベント 開催中 {target_year} {site_query}」
+    「{region} 新規オープン {target_year} {site_query}」
+    「{region} 期間限定 {target_year} {site_query}」
 
     【基準日】
     本日は {today} です。終了済みのイベントは除外してください。
 
-    【厳守ルール】
-    1. **日付の厳格化**: 記事の日付が2025年以降であることを確認してください。2022年や2023年の情報は絶対に含めないでください。
-    2. **URLの完全コピー**: 検索結果に表示されている**URL（Source Link）**をそのまま使用してください。自分でURLを推測したり書き換えたりすることは**禁止**です。
-    3. **実在性**: 記事のタイトルとスニペットにある情報だけで構成してください。
+    【厳守ルール：中身のない情報の排除】
+    1. **「施設名」だけの情報は禁止です。**
+       × ダメな例: 名前「渋谷スクランブルスクエア」 / 概要「ショップ情報です」
+       ○ 良い例: 名前「渋谷スクランブルスクエア 5周年記念フェア」 / 概要「限定スイーツが販売」
+    2. **URL**: 検索結果の**記事URL**をそのまま使用してください。
+    3. **件数**: 検索結果から可能な限り多く（最大20件）抽出してください。
 
     【出力形式（JSONのみ）】
     [
@@ -100,46 +99,34 @@ if st.button("検索開始", type="primary"):
             "date_info": "期間(例: 11/1〜12/25)",
             "description": "概要(短くてOK)",
             "source_name": "サイト名",
-            "url": "検索結果のURLをそのまま貼る",
+            "url": "記事のURL",
             "lat": 緯度(数値・不明ならnull),
             "lon": 経度(数値・不明ならnull)
         }}
     ]
     """
 
-    # 検索実行関数（リトライ機能付き）
-    def execute_search_with_retry(model_name):
-        max_retries = 3
-        for attempt in range(max_retries):
-            try:
-                return client.models.generate_content(
-                    model=model_name,
-                    contents=prompt,
-                    config=types.GenerateContentConfig(
-                        tools=[types.Tool(google_search=types.GoogleSearch())],
-                        response_mime_type="application/json",
-                        temperature=0.0
-                    )
-                )
-            except Exception as e:
-                if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
-                    wait_time = 5 * (attempt + 1)
-                    status_text.warning(f"⚠️ アクセス集中... {wait_time}秒待機して再試行します({attempt+1}/{max_retries})")
-                    time.sleep(wait_time)
-                    continue
-                else:
-                    raise e
-        raise Exception("通信エラー")
+    # 検索実行関数
+    def execute_search(model_name):
+        return client.models.generate_content(
+            model=model_name,
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                tools=[types.Tool(google_search=types.GoogleSearch())],
+                response_mime_type="application/json",
+                temperature=0.0
+            )
+        )
 
     # STEP 2: 検索実行
-    status_text.info(f"🔍 {region}周辺の情報を検索中... (2025年以降の記事のみ)")
+    status_text.info(f"🔍 {region}周辺の情報を検索中... (施設情報の除外フィルタ適用)")
     progress_bar.progress(30)
 
     response = None
     
     try:
-        # gemini-2.0-flash-exp を使用
-        response = execute_search_with_retry("gemini-2.0-flash-exp")
+        # Gemini 2.0 Flash Expを使用 (検索能力が高い)
+        response = execute_search("gemini-2.0-flash-exp")
     except Exception as e:
         st.error(f"エラーが発生しました: {e}")
         st.stop()
@@ -164,21 +151,29 @@ if st.button("検索開始", type="primary"):
         except:
             pass
     
-    # --- クリーニング & URL物理フィルタリング ---
+    # --- クリーニング & 物理フィルタリング ---
     cleaned_data = []
     for item in data:
         name = item.get('name', '')
+        place = item.get('place', '')
         url = item.get('url', '')
         
-        # 名前チェック
+        # 1. 名前チェック
         if not name or name.lower() in ['unknown', 'イベント']:
             continue
+
+        # 2. ★施設名除外ロジック★
+        # イベント名と場所名がほぼ同じ場合（例：name="渋谷パルコ", place="渋谷パルコ"）は除外
+        if name.replace(" ", "") == place.replace(" ", ""):
+            continue
+        # イベント名に「開催中」などの単語しか入っていない場合も除外
+        if len(name) < 4:
+            continue
         
-        # URLチェック
+        # 3. URLチェック
         is_valid = False
         if url and url.startswith("http"):
             for path in target_paths:
-                # ドメインチェック
                 check_domain = path.split('/')[0] 
                 if check_domain in url:
                     is_valid = True
@@ -186,7 +181,7 @@ if st.button("検索開始", type="primary"):
         
         # 幻覚URLブロック
         if "kanko.walkerplus" in url: is_valid = False
-        if "/words/" in url: is_valid = False # 用語集ブロック
+        if "/words/" in url: is_valid = False
 
         if not is_valid:
             search_query = f"{item['name']} {item['place']} イベント"
@@ -206,7 +201,7 @@ if st.button("検索開始", type="primary"):
         status_text.error("条件に合う記事が見つかりませんでした。")
         st.stop()
     else:
-        status_text.success(f"検索完了！ {len(data)}件の情報を取得しました。")
+        status_text.success(f"検索完了！ {len(data)}件の具体的なイベント情報を取得しました。")
 
     # データフレーム変換
     df = pd.DataFrame(data)
