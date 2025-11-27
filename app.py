@@ -172,21 +172,19 @@ if st.button("検索開始", type="primary"):
                 ))
                 st.caption("※地図上の赤い丸にマウスを乗せると詳細が表示されます。")
                 
-                # ★ここを追加！ Googleマイマップ用CSV作成ロジック
-                # マイマップで読み込みやすい形式にデータを加工
+                # Googleマイマップ用CSV作成
                 export_data = []
                 for _, row in map_df.iterrows():
-                    # 説明文の中に日付やURLなどを詰め込む
                     desc = f"【期間】{row.get('display_date')}\n【場所】{row.get('place')}\n{row.get('description')}\n{row.get('url', '')}"
                     export_data.append({
-                        "Name": row.get('name'),      # タイトル
-                        "Description": desc,          # 説明文
-                        "Latitude": row.get('lat'),   # 緯度
-                        "Longitude": row.get('lon')   # 経度
+                        "Name": row.get('name'),
+                        "Description": desc,
+                        "Latitude": row.get('lat'),
+                        "Longitude": row.get('lon')
                     })
                 
                 export_df = pd.DataFrame(export_data)
-                csv = export_df.to_csv(index=False).encode('utf-8_sig') # Windows等での文字化け防止(BOM付き)
+                csv = export_df.to_csv(index=False).encode('utf-8_sig')
 
                 st.download_button(
                     label="📥 Googleマイマップ用CSVをダウンロード",
@@ -199,32 +197,29 @@ if st.button("検索開始", type="primary"):
             else:
                 st.warning("地図データが取得できませんでした。")
 
-            # --- 2. 速報テキストリスト ---
+            # --- 2. 速報テキストリスト（詳細統合版） ---
             st.markdown("---")
-            st.subheader("📋 速報テキストリスト")
+            st.subheader("📋 イベント情報一覧")
             
             for item in data:
+                # リンクがある場合はリンクテキストを作成
+                url_text = "なし"
+                if item.get('url'):
+                    url_text = f"[🔗 公式サイト・関連情報]({item.get('url')})"
+
                 st.markdown(f"""
                 - **期間**: {item.get('display_date')}
                 - **種別**: {item.get('type')}
                 - **店名/イベント名**: {item.get('name')}
                 - **場所**: {item.get('place')}
                 - **概要**: {item.get('description')}
+                - **リンク**: {url_text}
                 """)
+            
+            # 詳細リスト（st.expander）の部分は削除しました
 
-            # --- 3. 詳細リスト ---
-            st.markdown("---")
-            st.subheader("📝 詳細・リンク")
-            for item in data:
-                with st.expander(f"{item.get('display_date')} : {item.get('name', '名称不明')}"):
-                    st.write(f"**種別**: {item.get('type', '')}")
-                    st.write(f"**場所**: {item.get('place', '')}")
-                    st.write(f"**概要**: {item.get('description', '')}")
-                    if item.get('url'):
-                        st.markdown(f"[🔗 公式情報・関連リンク]({item.get('url')})")
-                        
             # 参照元リンク
-            with st.expander("📚 参考にしたWebページ"):
+            with st.expander("📚 参考にしたWebページ（AIの検索ソース）"):
                 if response.candidates[0].grounding_metadata.grounding_chunks:
                     for chunk in response.candidates[0].grounding_metadata.grounding_chunks:
                         if chunk.web:
