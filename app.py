@@ -8,7 +8,7 @@ import pandas as pd
 import re
 import pydeck as pdk
 import urllib.parse
-import time # 時間調整用
+import time
 
 # ページの設定
 st.set_page_config(page_title="トレンド・イベント検索", page_icon="🗺️")
@@ -56,21 +56,23 @@ if st.button("検索開始", type="primary"):
         st.error("⚠️ 検索対象を少なくとも1つ選択してください。")
         st.stop()
 
-    # 進捗バーの表示
+    # 進捗バー
     progress_bar = st.progress(0)
     status_text = st.empty()
 
-    # STEP 1: 準備 (10%)
+    # STEP 1: 準備
     status_text.info("🚀 検索エンジンを起動中...")
     time.sleep(1)
     progress_bar.progress(10)
     
     client = genai.Client(api_key=api_key)
     target_paths = [SITE_PATHS[label] for label in selected_labels]
+    
+    # 検索クエリ作成
     site_query = " OR ".join([f"site:{path}" for path in target_paths])
     today = datetime.date.today()
 
-    # プロンプト (Proモデル向けに、さらに厳密な指示に変更)
+    # プロンプト (Proモデル向け)
     prompt = f"""
     あなたは「高精度なファクトチェック・ロボット」です。
     Google検索を行い、以下の条件に合致するイベント情報を慎重に抽出してください。
@@ -83,9 +85,8 @@ if st.button("検索開始", type="primary"):
     本日は {today} です。終了済みのイベントは除外してください。
 
     【最重要ルール：URLの実在確認】
-    1. **URLの推測・創作は厳禁です。** Walkerplusなどの記事URLにある数字ID（例: article/12345/）を勝手に変えたり、適当な数字を入れたりしないでください。
-    2. **検索結果に表示されている「リンクそのもの」** をコピーして使用してください。
-    3. もし記事の個別URLが検索結果から読み取れない場合は、無理にURLを貼らず `null` にしてください。嘘のURLを貼るよりマシです。
+    1. **URLの推測・創作は厳禁です。** 2. **検索結果に表示されている「リンクそのもの」** をコピーして使用してください。
+    3. 記事の個別URLが不明な場合は `null` にしてください。
 
     【出力形式（JSONのみ）】
     [
@@ -95,14 +96,14 @@ if st.button("検索開始", type="primary"):
             "date_info": "期間(例: 11/1〜12/25)",
             "description": "概要(短くてOK)",
             "source_name": "サイト名",
-            "url": "記事のURL(実在するもののみ)",
+            "url": "記事のURL",
             "lat": 緯度(数値・不明ならnull),
             "lon": 経度(数値・不明ならnull)
         }}
     ]
     """
 
-    # STEP 2: 検索実行 (30%)
+    # STEP 2: 検索実行
     status_text.info(f"🔍 {region}周辺の情報を検索中... (Proモデルで詳細に解析します)")
     progress_bar.progress(30)
 
@@ -114,29 +115,30 @@ if st.button("検索開始", type="primary"):
             config=types.GenerateContentConfig(
                 tools=[types.Tool(google_search=types.GoogleSearch())],
                 response_mime_type="application/json",
-                temperature=0.0 # 創造性ゼロ
+                temperature=0.0
             )
         )
 
     response = None
     
+    # ★修正箇所：モデル名を標準的なものに変更
     try:
-        # ★ここを変更: gemini-1.5-pro-002 (高性能・低速モデル) を使用
-        # これにより「ちゃんと考えて」から答えを出すようになります
-        response = execute_search("gemini-1.5-pro-002")
+        # 1. まずは「Pro」を試す（最も賢い）
+        response = execute_search("gemini-1.5-pro")
     except Exception as e:
-        status_text.warning("⚠️ Proモデルが応答しないため、バックアップモデルに切り替えます...")
+        status_text.warning("⚠️ Proモデルの応答が遅いため、高速モデル(Flash)に切り替えます...")
         try:
+            # 2. ダメなら「Flash」を試す（制限にかかりにくい）
             time.sleep(2)
-            response = execute_search("gemini-1.5-flash-002")
+            response = execute_search("gemini-1.5-flash")
         except Exception as e2:
             st.error(f"エラーが発生しました: {e2}")
             st.stop()
 
-    # STEP 3: データの解析と検証 (80%)
+    # STEP 3: データの解析
     status_text.info("📝 取得した記事データの整合性とURLをチェック中...")
     progress_bar.progress(80)
-    time.sleep(1) # チェックしている感を演出（実際には以下の処理時間は短いので）
+    time.sleep(1)
 
     # --- JSONデータの抽出 ---
     text = response.text.replace("```json", "").replace("```", "").strip()
@@ -160,14 +162,13 @@ if st.button("検索開始", type="primary"):
         name = item.get('name', '')
         url = item.get('url', '')
         
-        # 1. 名前チェック
+        # 名前チェック
         if not name or name.lower() in ['unknown', 'イベント']:
             continue
         
-        # 2. URLチェック (ドメイン指定 + 404になりがちなパターン排除)
+        # URLチェック
         is_valid = False
         if url and url.startswith("http"):
-            # 許可されたパスが含まれているか
             for path in target_paths:
                 # パスのドメイン部分だけで簡易チェック
                 check_domain = path.split('/')[0] 
@@ -175,12 +176,10 @@ if st.button("検索開始", type="primary"):
                     is_valid = True
                     break
         
-        # ★ Walkerplusの幻覚URL (kankoサブドメイン等) を再度物理ブロック
-        if "kanko.walkerplus" in url:
-            is_valid = False
+        # 幻覚URLブロック
+        if "kanko.walkerplus" in url: is_valid = False
 
         if not is_valid:
-            # URLが怪しい、またはnullの場合はGoogle検索リンクへ
             search_query = f"{item['name']} {item['place']} イベント"
             item['url'] = f"https://www.google.com/search?q={urllib.parse.quote(search_query)}"
             item['source_name'] = "Google検索"
@@ -189,17 +188,16 @@ if st.button("検索開始", type="primary"):
         
     data = cleaned_data
 
-    # STEP 4: 完了 (100%)
+    # STEP 4: 完了
     progress_bar.progress(100)
     time.sleep(0.5)
-    progress_bar.empty() # バーを消す
+    progress_bar.empty()
 
     if not data:
         status_text.error("条件に合う記事が見つかりませんでした。")
         st.stop()
     else:
         status_text.success(f"検索完了！ {len(data)}件の情報を取得しました。")
-
 
     # データフレーム変換
     df = pd.DataFrame(data)
