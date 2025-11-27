@@ -83,4 +83,151 @@ if st.button("検索開始", type="primary"):
         # AIにリクエスト
         response = client.models.generate_content(
             model="gemini-2.0-flash",
-            contents=prompt
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                tools=[types.Tool(google_search=types.GoogleSearch())],
+                response_mime_type="application/json",
+                temperature=0.0  # 嘘をつかせない
+            )
+        )
+
+        status_text.empty()
+        
+        # --- JSONデータの抽出 ---
+        text = response.text.replace("```json", "").replace("```", "").strip()
+        data = []
+        
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError as e:
+            try:
+                if e.msg.startswith("Extra data"):
+                    data = json.loads(text[:e.pos])
+                else:
+                    match = re.search(r'\[.*\]', text, re.DOTALL)
+                    if match:
+                        candidate = match.group(0)
+                        data = json.loads(candidate)
+            except:
+                pass
+        
+        # --- クリーニング処理（変なデータを除去） ---
+        cleaned_data = []
+        for item in data:
+            # 名前がunknown、あるいは空欄のものは捨てる
+            name = item.get('name', '').lower()
+            if not name or name == 'unknown' or name == 'イベント' or name == '情報なし':
+                continue
+            # URLがないものも捨てる
+            if not item.get('url'):
+                continue
+            cleaned_data.append(item)
+            
+        data = cleaned_data
+
+        # データが空だった場合
+        if not data:
+            st.warning(f"⚠️ {region} エリアの最新情報は、信頼できるソースからは見つかりませんでした。")
+            st.info("💡 ヒント: エリア名を「渋谷区」から「渋谷」や「表参道」のように変えると見つかる場合があります。")
+            st.stop()
+
+        # --- 期間表示用の整形処理 ---
+        for item in data:
+            s_date = item.get('start_date')
+            e_date = item.get('end_date')
+            
+            # 日付が入っていない場合の処理
+            if not s_date:
+                item['display_date'] = "開催中/近日"
+            elif s_date and e_date:
+                if s_date == e_date:
+                    item['display_date'] = s_date
+                else:
+                    item['display_date'] = f"{s_date} 〜 {e_date}"
+            else:
+                item['display_date'] = s_date
+
+        # データフレーム変換
+        df = pd.DataFrame(data)
+
+        # --- 1. 高機能地図 (Voyager) ---
+        st.subheader(f"📍 {region}周辺のトレンドマップ")
+        
+        if not df.empty and 'lat' in df.columns and 'lon' in df.columns:
+            map_df = df.dropna(subset=['lat', 'lon'])
+            
+            view_state = pdk.ViewState(
+                latitude=map_df['lat'].mean(),
+                longitude=map_df['lon'].mean(),
+                zoom=13,
+                pitch=0,
+            )
+
+            layer = pdk.Layer(
+                "ScatterplotLayer",
+                map_df,
+                get_position='[lon, lat]',
+                get_color='[255, 75, 75, 160]',
+                get_radius=200,
+                pickable=True,
+            )
+
+            st.pydeck_chart(pdk.Deck(
+                map_style='https://basemaps.cartocdn.com/gl/voyager-gl-style/style.json',
+                initial_view_state=view_state,
+                layers=[layer],
+                tooltip={
+                    "html": "<b>{name}</b><br/>{place}<br/><i>{description}</i>",
+                    "style": {"backgroundColor": "steelblue", "color": "white"}
+                }
+            ))
+            st.caption("※地図上の赤い丸にマウスを乗せると詳細が表示されます。")
+            
+            # CSV作成
+            export_data = []
+            for _, row in map_df.iterrows():
+                gaiyou = f"【期間】{row.get('display_date')}\n{row.get('description')}"
+                export_data.append({
+                    "Name": row.get('name'),
+                    "住所": row.get('place'),
+                    "概要": gaiyou,
+                    "公式サイト": row.get('url', '')
+                })
+            
+            export_df = pd.DataFrame(export_data)
+            csv = export_df.to_csv(index=False).encode('utf-8_sig')
+
+            st.download_button(
+                label="📥 Googleマイマップ用CSVをダウンロード",
+                data=csv,
+                file_name=f"event_map_{region}.csv",
+                mime='text/csv',
+                help="このファイルをGoogleマイマップにインポートし、「住所」列を目印の場所に指定してください。"
+            )
+
+        else:
+            st.warning("地図データが取得できませんでした。")
+
+        # --- 2. 速報テキストリスト ---
+        st.markdown("---")
+        st.subheader("📋 最新トレンド情報一覧")
+        
+        for item in data:
+            url_text = "なし"
+            source_label = item.get('source_name', '詳細記事')
+            
+            if item.get('url'):
+                url_text = f"[🔗 {source_label} で記事を読む]({item.get('url')})"
+
+            st.markdown(f"""
+            - **期間**: {item.get('display_date')}
+            - **種別**: {item.get('type')}
+            - **店名/イベント名**: {item.get('name')}
+            - **場所**: {item.get('place')}
+            - **概要**: {item.get('description')}
+            - **ソース**: {url_text}
+            """)
+
+    except Exception as e:
+        status_text.empty()
+        st.error(f"予期せぬエラーが発生しました: {e}")
