@@ -139,13 +139,12 @@ if st.button("検索開始", type="primary"):
             # データフレーム変換
             df = pd.DataFrame(data)
 
-            # --- 1. 高機能地図の表示 (PyDeck) ---
+            # --- 1. 高機能地図の表示 (Voyagerスタイル) ---
             st.subheader(f"📍 {region}周辺のイベントマップ")
             
             if not df.empty and 'lat' in df.columns and 'lon' in df.columns:
                 map_df = df.dropna(subset=['lat', 'lon'])
                 
-                # ビューの設定
                 view_state = pdk.ViewState(
                     latitude=map_df['lat'].mean(),
                     longitude=map_df['lon'].mean(),
@@ -153,7 +152,6 @@ if st.button("検索開始", type="primary"):
                     pitch=0,
                 )
 
-                # レイヤーの設定
                 layer = pdk.Layer(
                     "ScatterplotLayer",
                     map_df,
@@ -163,7 +161,6 @@ if st.button("検索開始", type="primary"):
                     pickable=True,
                 )
 
-                # ★ここを変更しました！ (Voyagerスタイル)
                 st.pydeck_chart(pdk.Deck(
                     map_style='https://basemaps.cartocdn.com/gl/voyager-gl-style/style.json',
                     initial_view_state=view_state,
@@ -174,6 +171,31 @@ if st.button("検索開始", type="primary"):
                     }
                 ))
                 st.caption("※地図上の赤い丸にマウスを乗せると詳細が表示されます。")
+                
+                # ★ここを追加！ Googleマイマップ用CSV作成ロジック
+                # マイマップで読み込みやすい形式にデータを加工
+                export_data = []
+                for _, row in map_df.iterrows():
+                    # 説明文の中に日付やURLなどを詰め込む
+                    desc = f"【期間】{row.get('display_date')}\n【場所】{row.get('place')}\n{row.get('description')}\n{row.get('url', '')}"
+                    export_data.append({
+                        "Name": row.get('name'),      # タイトル
+                        "Description": desc,          # 説明文
+                        "Latitude": row.get('lat'),   # 緯度
+                        "Longitude": row.get('lon')   # 経度
+                    })
+                
+                export_df = pd.DataFrame(export_data)
+                csv = export_df.to_csv(index=False).encode('utf-8_sig') # Windows等での文字化け防止(BOM付き)
+
+                st.download_button(
+                    label="📥 Googleマイマップ用CSVをダウンロード",
+                    data=csv,
+                    file_name=f"event_map_{region}.csv",
+                    mime='text/csv',
+                    help="このファイルをGoogleマイマップにインポートすると、スマホのGoogleマップで場所を確認できます。"
+                )
+
             else:
                 st.warning("地図データが取得できませんでした。")
 
