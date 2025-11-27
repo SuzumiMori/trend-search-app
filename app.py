@@ -17,12 +17,6 @@ st.set_page_config(page_title="トレンド・イベント検索", page_icon="�
 st.title("📖 イベント情報「一括直読」抽出アプリ")
 st.markdown("指定したWebページをAIが読み込み、情報を統合・整理してテーブル表示します。")
 
-# --- Session Stateの初期化 (データを保持するための箱を作る) ---
-if 'extracted_data' not in st.session_state:
-    st.session_state.extracted_data = None
-if 'last_update' not in st.session_state:
-    st.session_state.last_update = None
-
 # --- サイドバー: 設定エリア ---
 with st.sidebar:
     st.header("読み込み対象 (複数選択可)")
@@ -51,9 +45,15 @@ with st.sidebar:
         height=100
     )
 
-    st.info("💡 重複するイベントは自動的に統合されます。")
+    st.info("💡 「きょうから」等の表現は、具体的な日付に変換されます。")
 
-# --- メインエリア: 読み込みボタン処理 ---
+# --- Session State ---
+if 'extracted_data' not in st.session_state:
+    st.session_state.extracted_data = None
+if 'last_update' not in st.session_state:
+    st.session_state.last_update = None
+
+# --- メインエリア ---
 
 if st.button("一括読み込み開始", type="primary"):
     try:
@@ -74,7 +74,6 @@ if st.button("一括読み込み開始", type="primary"):
                 domain = urllib.parse.urlparse(url).netloc
                 targets.append({"url": url, "label": f"カスタム ({domain})"})
     
-    # 重複URL除去
     unique_targets = {t['url']: t for t in targets}
     targets = list(unique_targets.values())
 
@@ -82,9 +81,9 @@ if st.button("一括読み込み開始", type="primary"):
         st.error("⚠️ URLが指定されていません。")
         st.stop()
 
-    # 処理開始
     all_data = []
     client = genai.Client(api_key=api_key)
+    today = datetime.date.today()
     
     progress_bar = st.progress(0)
     status_text = st.empty()
@@ -111,23 +110,27 @@ if st.button("一括読み込み開始", type="primary"):
             soup = BeautifulSoup(response.text, "html.parser")
             for script in soup(["script", "style", "nav", "footer", "iframe", "header"]):
                 script.decompose()
-            page_text = soup.get_text(separator="\n", strip=True)[:40000]
+            page_text = soup.get_text(separator="\n", strip=True)[:50000]
 
-            # AI解析
+            # AI解析 (プロンプトを強化)
             prompt = f"""
             あなたはデータ抽出アシスタントです。
             以下のWebページのテキストから「イベント情報」を抽出し、JSON形式でリスト化してください。
 
-            【ページ情報】
-            URL: {url}
-            サイト名: {label}
+            【前提情報】
+            ・本日の日付: {today.strftime('%Y年%m月%d日')}
+            ・ページURL: {url}
+            ・サイト名: {label}
+
             【テキスト内容】
             {page_text}
 
-            【抽出ルール】
+            【抽出ルール（重要）】
             1. イベント名、期間、場所、概要を抽出してください。
-            2. テキストにない情報は創作せず、不明なら空欄にしてください。
-            3. `lat` `lon` は場所名から推測して埋めてください。
+            2. **日付の具体化**: テキスト内の「きょうから」「明日開催」「今週末」といった相対的な表現は禁止です。
+               - 記事内に記載されている「公開日」や「イベント期間（例: 2025.11.28〜）」を探し、必ず**「YYYY年MM月DD日〜」のような具体的な日付形式**に変換してください。
+               - どうしても日付が特定できない場合のみ、原文のままにしてください。
+            3. 場所の緯度経度（lat, lon）は、場所名から推測して埋めてください。
             4. `source_url` はこのページのURL({url})としてください。
 
             【出力形式（JSONのみ）】
@@ -135,7 +138,7 @@ if st.button("一括読み込み開始", type="primary"):
                 {{
                     "name": "イベント名",
                     "place": "開催場所",
-                    "date_info": "期間",
+                    "date_info": "期間(具体的な日付で)",
                     "description": "概要(簡潔に)",
                     "lat": 緯度(数値),
                     "lon": 経度(数値)
@@ -169,11 +172,9 @@ if st.button("一括読み込み開始", type="primary"):
 
     if not all_data:
         st.error("情報が見つかりませんでした。")
-        # データがない場合、セッションステートもクリア
         st.session_state.extracted_data = None
     else:
-        # --- ここでデータをセッションステートに保存！ ---
-        # 重複削除ロジック
+        # 重複削除
         unique_data = []
         seen_keys = set()
         for item in all_data:
@@ -185,14 +186,11 @@ if st.button("一括読み込み開始", type="primary"):
                 seen_keys.add(unique_key)
                 unique_data.append(item)
         
-        # 保存
         st.session_state.extracted_data = unique_data
         st.session_state.last_update = datetime.datetime.now().strftime("%H:%M:%S")
-        
         status_text.success(f"🎉 読み込み完了！ ({st.session_state.last_update})")
 
-
-# --- 結果表示エリア (セッションステートにデータがあれば表示) ---
+# --- 結果表示エリア ---
 
 if st.session_state.extracted_data is not None:
     data = st.session_state.extracted_data
@@ -228,14 +226,12 @@ if st.session_state.extracted_data is not None:
 
     # 2. テーブル表示
     st.markdown("---")
-    st.subheader("📋 イベント一覧 (テーブル形式)")
+    st.subheader("📋 イベント一覧")
 
     display_cols = ['date_info', 'name', 'place', 'description', 'source_label', 'source_url']
-    # データフレームに存在しないカラムがないかチェックしてから選択
     available_cols = [c for c in display_cols if c in df.columns]
     display_df = df[available_cols].copy()
     
-    # カラム名変更
     rename_map = {
         'date_info': '期間', 'name': 'イベント名', 'place': '場所', 
         'description': '概要', 'source_label': '情報源', 'source_url': 'リンクURL'
@@ -252,7 +248,7 @@ if st.session_state.extracted_data is not None:
         hide_index=True
     )
 
-    # 3. CSVダウンロード (ここを押しても画面は消えません！)
+    # 3. CSVダウンロード
     csv = display_df.to_csv(index=False).encode('utf-8_sig')
     st.download_button(
         label="📥 CSVをダウンロード",
