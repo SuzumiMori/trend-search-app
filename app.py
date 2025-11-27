@@ -12,16 +12,16 @@ import time
 import urllib.parse
 
 # ページの設定
-st.set_page_config(page_title="トレンド・イベント検索", page_icon="📖")
+st.set_page_config(page_title="トレンド・イベント検索", page_icon="📖", layout="wide") # 横幅を広く使う設定
 
 st.title("📖 イベント情報「一括直読」抽出アプリ")
-st.markdown("指定したWebページをAIが読み込み、情報を統合してリスト化します。")
+st.markdown("指定したWebページをAIが読み込み、情報を統合・整理してテーブル表示します。")
 
 # --- サイドバー: 設定エリア ---
 with st.sidebar:
     st.header("読み込み対象 (複数選択可)")
     
-    # プリセットURLリスト (URLを修正しました)
+    # プリセットURLリスト
     PRESET_URLS = {
         "Walkerplus (今日のイベント/東京)": "https://www.walkerplus.com/event_list/today/ar0300/",
         "Walkerplus (今週末のイベント/東京)": "https://www.walkerplus.com/event_list/weekend/ar0300/",
@@ -32,7 +32,6 @@ with st.sidebar:
         "TimeOut Tokyo (東京のイベント)": "https://www.timeout.jp/tokyo/ja/things-to-do"
     }
     
-    # マルチセレクト
     selected_presets = st.multiselect(
         "プリセットから選択",
         options=list(PRESET_URLS.keys()),
@@ -47,7 +46,7 @@ with st.sidebar:
         height=100
     )
 
-    st.info("💡 選択したすべてのページを順番に解析し、結果を1つのリストにまとめます。")
+    st.info("💡 重複するイベントは自動的に統合されます。")
 
 # --- メインエリア ---
 
@@ -58,26 +57,20 @@ if st.button("一括読み込み開始", type="primary"):
         st.error("⚠️ APIキーが設定されていません。")
         st.stop()
 
-    # 処理対象リストの作成 [{"url": "...", "label": "..."}]
+    # ターゲットリスト作成
     targets = []
-    
-    # プリセットから追加
     for label in selected_presets:
         targets.append({"url": PRESET_URLS[label], "label": label})
     
-    # カスタム入力から追加
     if custom_urls_text:
         for url in custom_urls_text.split('\n'):
             url = url.strip()
             if url and url.startswith("http"):
-                # ドメイン名をラベルにする
                 domain = urllib.parse.urlparse(url).netloc
                 targets.append({"url": url, "label": f"カスタム ({domain})"})
     
-    # 重複URLの除去 (URLをキーにしてユニーク化)
-    unique_targets = {}
-    for t in targets:
-        unique_targets[t['url']] = t
+    # 重複URL除去
+    unique_targets = {t['url']: t for t in targets}
     targets = list(unique_targets.values())
 
     if not targets:
@@ -90,40 +83,32 @@ if st.button("一括読み込み開始", type="primary"):
     
     progress_bar = st.progress(0)
     status_text = st.empty()
-    
     total_urls = len(targets)
     
-    # --- URLごとのループ処理 ---
+    # --- ループ処理 ---
     for i, target in enumerate(targets):
         url = target['url']
         label = target['label']
         
-        current_progress = (i / total_urls)
-        progress_bar.progress(current_progress)
+        progress_bar.progress(i / total_urls)
         status_text.info(f"⏳ ({i+1}/{total_urls}) 読み込み中...: {label}")
         
         try:
-            # 1. スクレイピング
-            headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-            }
+            # スクレイピング
+            headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"}
             response = requests.get(url, headers=headers, timeout=15)
             response.encoding = response.apparent_encoding
             
             if response.status_code != 200:
-                st.warning(f"⚠️ アクセス失敗 (Status: {response.status_code}): {url}")
+                st.warning(f"⚠️ アクセス失敗: {url}")
                 continue
 
             soup = BeautifulSoup(response.text, "html.parser")
-            
-            # 不要タグ削除
             for script in soup(["script", "style", "nav", "footer", "iframe", "header"]):
                 script.decompose()
-                
-            page_text = soup.get_text(separator="\n", strip=True)
-            page_text = page_text[:40000] # 文字数制限
+            page_text = soup.get_text(separator="\n", strip=True)[:40000]
 
-            # 2. AI解析
+            # AI解析
             prompt = f"""
             あなたはデータ抽出アシスタントです。
             以下のWebページのテキストから「イベント情報」を抽出し、JSON形式でリスト化してください。
@@ -131,15 +116,14 @@ if st.button("一括読み込み開始", type="primary"):
             【ページ情報】
             URL: {url}
             サイト名: {label}
-
             【テキスト内容】
             {page_text}
 
             【抽出ルール】
             1. イベント名、期間、場所、概要を抽出してください。
-            2. テキストに書かれていない情報は創作せず、不明なら空欄にしてください。
-            3. 場所の緯度経度（lat, lon）は、場所名から推測して埋めてください。
-            4. `source_url` にはこのページのURL({url})を入れてください。
+            2. テキストにない情報は創作せず、不明なら空欄にしてください。
+            3. `lat` `lon` は場所名から推測して埋めてください。
+            4. `source_url` はこのページのURL({url})としてください。
 
             【出力形式（JSONのみ）】
             [
@@ -154,50 +138,63 @@ if st.button("一括読み込み開始", type="primary"):
             ]
             """
 
-            # gemini-2.0-flash-exp を使用
             ai_response = client.models.generate_content(
                 model="gemini-2.0-flash-exp",
                 contents=prompt,
-                config=types.GenerateContentConfig(
-                    response_mime_type="application/json",
-                    temperature=0.0
-                )
+                config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0.0)
             )
             
-            # JSON変換
-            text_resp = ai_response.text.replace("```json", "").replace("```", "").strip()
-            extracted_list = json.loads(text_resp)
+            extracted_list = json.loads(ai_response.text.replace("```json", "").replace("```", "").strip())
             
-            # 結果を統合リストに追加 (ラベル情報を付与)
             if isinstance(extracted_list, list):
                 for item in extracted_list:
-                    item['source_label'] = label # ★ここを追加: 表示用ラベル
-                    item['source_url'] = url     # URL
+                    item['source_label'] = label
+                    item['source_url'] = url
                     all_data.append(item)
             
             time.sleep(1)
 
         except Exception as e:
-            st.warning(f"⚠️ エラーが発生したためスキップしました: {label}\nエラー内容: {e}")
+            st.warning(f"スキップしました: {label} (エラー: {e})")
             continue
 
-    # --- 完了処理 ---
     progress_bar.progress(100)
     time.sleep(0.5)
     progress_bar.empty()
 
     if not all_data:
-        st.error("イベント情報を抽出できませんでした。URLを確認してください。")
+        st.error("情報が見つかりませんでした。")
         st.stop()
-    else:
-        status_text.success(f"🎉 完了！ 合計 {len(all_data)} 件のイベント情報を抽出しました。")
 
-    # データフレーム変換
-    df = pd.DataFrame(all_data)
+    # --- 重複削除ロジック ---
+    # イベント名と場所を正規化してキーにし、既にあったら追加しない
+    unique_data = []
+    seen_keys = set()
 
-    # --- 1. マップ表示 (統合版) ---
-    st.subheader("📍 イベントマップ (全件)")
+    for item in all_data:
+        # 空白削除・小文字化して比較用キーを作成
+        name_key = str(item.get('name', '')).replace(" ", "").replace("　", "").lower()
+        place_key = str(item.get('place', '')).replace(" ", "").replace("　", "").lower()
+        
+        # キーが空ならスキップ
+        if not name_key:
+            continue
+
+        # ユニークキー: (イベント名, 場所名)
+        # ※場所が変われば同名イベントでも別物とみなす
+        unique_key = (name_key, place_key)
+
+        if unique_key not in seen_keys:
+            seen_keys.add(unique_key)
+            unique_data.append(item)
     
+    status_text.success(f"🎉 完了！ {len(all_data)}件中 {len(all_data) - len(unique_data)}件の重複を削除し、{len(unique_data)}件を表示します。")
+
+    # データフレーム作成
+    df = pd.DataFrame(unique_data)
+
+    # --- 1. マップ表示 ---
+    st.subheader("📍 イベントマップ")
     if not df.empty and 'lat' in df.columns and 'lon' in df.columns:
         map_df = df.dropna(subset=['lat', 'lon'])
         if not map_df.empty:
@@ -219,35 +216,42 @@ if st.button("一括読み込み開始", type="primary"):
                 map_style='https://basemaps.cartocdn.com/gl/voyager-gl-style/style.json',
                 initial_view_state=view_state,
                 layers=[layer],
-                tooltip={
-                    "html": "<b>{name}</b><br/>{place}<br/><i>{date_info}</i>",
-                    "style": {"backgroundColor": "steelblue", "color": "white"}
-                }
+                tooltip={"html": "<b>{name}</b><br/>{place}<br/><i>{date_info}</i>"}
             ))
-    
-    # --- 2. リスト表示 ---
+
+    # --- 2. テーブル表示 (スプレッドシート風) ---
     st.markdown("---")
-    st.subheader("📋 抽出されたイベントリスト")
+    st.subheader("📋 イベント一覧 (テーブル形式)")
+
+    # 表示用にカラムを整理
+    display_cols = ['date_info', 'name', 'place', 'description', 'source_label', 'source_url']
+    display_df = df[display_cols].copy()
     
-    # CSVダウンロード
-    csv = df.to_csv(index=False).encode('utf-8_sig')
-    st.download_button(
-        label="📥 全データをCSVでダウンロード",
-        data=csv,
-        file_name="events_all_extracted.csv",
-        mime='text/csv'
+    # カラム名を日本語に変更
+    display_df.columns = ['期間', 'イベント名', '場所', '概要', '情報源', 'リンクURL']
+
+    # インタラクティブなテーブルを表示
+    st.dataframe(
+        display_df,
+        use_container_width=True, # 横幅いっぱいに広げる
+        column_config={
+            "リンクURL": st.column_config.LinkColumn(
+                "元記事へ", # 表示テキスト
+                display_text="🔗 リンクを開く" # セル内の表示
+            ),
+            "概要": st.column_config.TextColumn(
+                "概要",
+                width="large" # 概要欄を広めに
+            )
+        },
+        hide_index=True # 行番号を隠す
     )
 
-    # リスト表示
-    for item in all_data:
-        # リンクテキストを「サイト名」にする
-        link_text = item.get('source_label', '情報元ページ')
-        link_url = item.get('source_url', '#')
-
-        st.markdown(f"""
-        - **期間**: {item.get('date_info')}
-        - **イベント名**: {item.get('name')}
-        - **場所**: {item.get('place')}
-        - **概要**: {item.get('description')}
-        - [🔗 {link_text} で確認]({link_url})
-        """)
+    # CSVダウンロード
+    csv = display_df.to_csv(index=False).encode('utf-8_sig')
+    st.download_button(
+        label="📥 CSVをダウンロード",
+        data=csv,
+        file_name="events_list.csv",
+        mime='text/csv'
+    )
