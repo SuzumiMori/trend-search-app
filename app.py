@@ -5,287 +5,212 @@ from google.genai import types
 import os
 import json
 import pandas as pd
-import re
 import pydeck as pdk
-import urllib.parse
+import requests
+from bs4 import BeautifulSoup
 import time
 
 # ページの設定
-st.set_page_config(page_title="トレンド・イベント検索", page_icon="🗺️")
+st.set_page_config(page_title="トレンド・イベント検索", page_icon="📖")
 
-st.title("🗺️ トレンド・イベントMap検索")
-st.markdown("主要メディアの記事から「期間限定イベント」や「新店情報」を抽出します。（施設自体の紹介は除外）")
+st.title("📖 イベント情報「直読」抽出アプリ")
+st.markdown("指定したWebページの中身を直接AIが読み込み、正確なイベントリストを作成します。")
 
 # --- サイドバー: 設定エリア ---
 with st.sidebar:
-    st.header("検索条件")
-    st.markdown("### 📍 地域・場所")
-    region = st.text_input("検索したい場所", value="東京都渋谷区", help="具体的な地名を入力してください。")
+    st.header("読み込み対象")
     
-    st.markdown("---")
-    st.markdown("### 🌐 検索対象サイト")
-    
-    SITE_PATHS = {
-        "Fashion Press (ニュース)": "fashion-press.net/news/",
-        "Walkerplus (イベント記事)": "walkerplus.com/article/",
-        "Let's Enjoy Tokyo (イベント)": "enjoytokyo.jp/event/",
-        "TimeOut Tokyo (ガイド)": "timeout.jp/tokyo/ja/things-to-do/",
-        "PR TIMES (プレスリリース)": "prtimes.jp/main/html/rd/p/",
-        "FASHIONSNAP (ニュース)": "fashionsnap.com/article/"
+    # プリセットURL（東京・渋谷周辺のイベント一覧）
+    PRESET_URLS = {
+        "Walkerplus (今日のイベント/東京)": "https://www.walkerplus.com/event_list/today/ar0300/",
+        "Walkerplus (今週末のイベント/東京)": "https://www.walkerplus.com/event_list/weekend/ar0300/",
+        "Walkerplus (来週のイベント/東京)": "https://www.walkerplus.com/event_list/next_week/ar0300/",
+        "Let's Enjoy Tokyo (現在開催中のイベント/渋谷)": "https://www.enjoytokyo.jp/event/list/chi03/?date_type=current",
+        "Fashion Press (最新ニュース)": "https://www.fashion-press.net/news/",
+        "【自由入力】": "custom"
     }
     
-    selected_labels = st.multiselect(
-        "検索対象（複数選択可）",
-        options=list(SITE_PATHS.keys()),
-        default=["Fashion Press (ニュース)", "Walkerplus (イベント記事)", "Let's Enjoy Tokyo (イベント)"]
-    )
+    selected_preset = st.selectbox("対象サイトを選択", list(PRESET_URLS.keys()))
     
-    st.info("💡 施設名だけの情報は自動的に除外されます。")
+    target_url = ""
+    if selected_preset == "【自由入力】":
+        target_url = st.text_input("URLを貼り付けてください", placeholder="https://...")
+    else:
+        target_url = PRESET_URLS[selected_preset]
+        st.caption(f"URL: {target_url}")
+
+    st.info("💡 検索ではなく、このページの文章をそのままAIに読ませます。")
 
 # --- メインエリア ---
 
-if st.button("検索開始", type="primary"):
+if st.button("読み込み開始", type="primary"):
     try:
         api_key = st.secrets["GOOGLE_API_KEY"]
     except:
         st.error("⚠️ APIキーが設定されていません。")
         st.stop()
 
-    if not selected_labels:
-        st.error("⚠️ 検索対象を少なくとも1つ選択してください。")
+    if not target_url:
+        st.error("⚠️ URLを指定してください。")
         st.stop()
 
-    # 進捗バー
+    # 進捗表示
     progress_bar = st.progress(0)
     status_text = st.empty()
 
-    status_text.info("🚀 検索エンジンを起動中...")
-    time.sleep(1)
-    progress_bar.progress(10)
-    
+    # --- STEP 1: Webページのテキスト取得 (Scraping) ---
+    status_text.info(f"📥 ページの内容を取得中...: {target_url}")
+    progress_bar.progress(20)
+
+    try:
+        # ブラウザのふりをする（ブロック回避）
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+        }
+        response = requests.get(target_url, headers=headers, timeout=10)
+        response.encoding = response.apparent_encoding # 文字化け防止
+        
+        if response.status_code != 200:
+            st.error(f"ページの取得に失敗しました (Status Code: {response.status_code})")
+            st.stop()
+
+        # HTMLからテキストのみ抽出
+        soup = BeautifulSoup(response.text, "html.parser")
+        
+        # 不要なタグ（スクリプトやスタイル）を削除
+        for script in soup(["script", "style", "nav", "footer"]):
+            script.decompose()
+            
+        # 本文テキストを取得 (余計な空白削除)
+        page_text = soup.get_text(separator="\n", strip=True)
+        
+        # テキストが長すぎる場合はカット（Geminiの入力制限対策・コスト削減）
+        # イベントリストは通常ページの上部〜中部に集まっているので、先頭30,000文字あれば十分
+        page_text = page_text[:30000]
+
+    except Exception as e:
+        st.error(f"ページの読み込みエラー: {e}")
+        st.stop()
+
+    # --- STEP 2: AIによる解析 (Gemini) ---
+    status_text.info("🤖 AIがページを解読してリスト化しています...")
+    progress_bar.progress(50)
+
     client = genai.Client(api_key=api_key)
-    target_paths = [SITE_PATHS[label] for label in selected_labels]
-    
-    # 検索クエリ作成
-    site_query = " OR ".join([f"site:{path}" for path in target_paths])
     today = datetime.date.today()
-    target_year = today.year
 
-    # プロンプト (施設名除外の指示を強化)
     prompt = f"""
-    あなたは「イベント情報の収集ロボット」です。
-    Google検索を行い、以下の条件に合致する**具体的なイベント記事**から情報を抽出してください。
+    あなたは優秀なデータ抽出アシスタントです。
+    以下の「Webページのテキストデータ」から、イベント情報を抽出し、JSON形式で整理してください。
 
-    【検索クエリ】
-    「{region} イベント 開催中 {target_year} {site_query}」
-    「{region} 新規オープン {target_year} {site_query}」
-    「{region} 期間限定 {target_year} {site_query}」
+    【Webページのテキスト】
+    {page_text}
 
-    【基準日】
-    本日は {today} です。終了済みのイベントは除外してください。
-
-    【厳守ルール：中身のない情報の排除】
-    1. **「施設名」だけの情報は禁止です。**
-       × ダメな例: 名前「渋谷スクランブルスクエア」 / 概要「ショップ情報です」
-       ○ 良い例: 名前「渋谷スクランブルスクエア 5周年記念フェア」 / 概要「限定スイーツが販売」
-    2. **URL**: 検索結果の**記事URL**をそのまま使用してください。
-    3. **件数**: 検索結果から可能な限り多く（最大20件）抽出してください。
+    【抽出ルール】
+    1. テキスト内に書かれているイベント名、開催期間、場所、概要を抜き出してください。
+    2. **テキストに書かれていない情報は絶対に創作しないでください。**
+    3. URLについては、このページ自体のURL（{target_url}）を「ソース」として扱います。もしテキスト内に個別の詳細URLへのリンクパスがあれば、それを補完しても構いません。
+    4. 場所の緯度経度（lat, lon）は、場所名からあなたが推測して埋めてください。
 
     【出力形式（JSONのみ）】
     [
         {{
             "name": "イベント名",
             "place": "開催場所",
-            "date_info": "期間(例: 11/1〜12/25)",
-            "description": "概要(短くてOK)",
-            "source_name": "サイト名",
-            "url": "記事のURL",
-            "lat": 緯度(数値・不明ならnull),
-            "lon": 経度(数値・不明ならnull)
+            "date_info": "期間(テキスト通りに)",
+            "description": "概要(簡潔に)",
+            "url": "関連URL(あれば)",
+            "lat": 緯度(数値),
+            "lon": 経度(数値)
         }}
     ]
     """
 
-    # 検索実行関数
-    def execute_search(model_name):
-        return client.models.generate_content(
-            model=model_name,
+    try:
+        # テキスト解析なので 1.5-flash で十分高速かつ正確
+        response = client.models.generate_content(
+            model="gemini-1.5-flash",
             contents=prompt,
             config=types.GenerateContentConfig(
-                tools=[types.Tool(google_search=types.GoogleSearch())],
                 response_mime_type="application/json",
-                temperature=0.0
+                temperature=0.0 # 忠実に抽出させる
             )
         )
-
-    # STEP 2: 検索実行
-    status_text.info(f"🔍 {region}周辺の情報を検索中... (施設情報の除外フィルタ適用)")
-    progress_bar.progress(30)
-
-    response = None
-    
-    try:
-        # Gemini 2.0 Flash Expを使用 (検索能力が高い)
-        response = execute_search("gemini-2.0-flash-exp")
-    except Exception as e:
-        st.error(f"エラーが発生しました: {e}")
-        st.stop()
-
-    # STEP 3: データの解析
-    status_text.info("📝 データの整合性とURLをチェック中...")
-    progress_bar.progress(80)
-
-    # --- JSONデータの抽出 ---
-    text = response.text.replace("```json", "").replace("```", "").strip()
-    data = []
-    try:
-        data = json.loads(text)
-    except json.JSONDecodeError as e:
+        
+        # --- JSONデータの抽出 ---
+        text_resp = response.text.replace("```json", "").replace("```", "").strip()
+        data = []
         try:
-            if e.msg.startswith("Extra data"):
-                data = json.loads(text[:e.pos])
-            else:
-                match = re.search(r'\[.*\]', text, re.DOTALL)
-                if match:
-                    data = json.loads(match.group(0))
+            data = json.loads(text_resp)
         except:
             pass
-    
-    # --- クリーニング & 物理フィルタリング ---
-    cleaned_data = []
-    for item in data:
-        name = item.get('name', '')
-        place = item.get('place', '')
-        url = item.get('url', '')
-        
-        # 1. 名前チェック
-        if not name or name.lower() in ['unknown', 'イベント']:
-            continue
 
-        # 2. ★施設名除外ロジック★
-        # イベント名と場所名がほぼ同じ場合（例：name="渋谷パルコ", place="渋谷パルコ"）は除外
-        if name.replace(" ", "") == place.replace(" ", ""):
-            continue
-        # イベント名に「開催中」などの単語しか入っていない場合も除外
-        if len(name) < 4:
-            continue
-        
-        # 3. URLチェック
-        is_valid = False
-        if url and url.startswith("http"):
-            for path in target_paths:
-                check_domain = path.split('/')[0] 
-                if check_domain in url:
-                    is_valid = True
-                    break
-        
-        # 幻覚URLブロック
-        if "kanko.walkerplus" in url: is_valid = False
-        if "/words/" in url: is_valid = False
+        progress_bar.progress(100)
+        time.sleep(0.5)
+        progress_bar.empty()
 
-        if not is_valid:
-            search_query = f"{item['name']} {item['place']} イベント"
-            item['url'] = f"https://www.google.com/search?q={urllib.parse.quote(search_query)}"
-            item['source_name'] = "Google検索"
-        
-        cleaned_data.append(item)
-        
-    data = cleaned_data
-
-    # STEP 4: 完了
-    progress_bar.progress(100)
-    time.sleep(0.5)
-    progress_bar.empty()
-
-    if not data:
-        status_text.error("条件に合う記事が見つかりませんでした。")
-        st.stop()
-    else:
-        status_text.success(f"検索完了！ {len(data)}件の具体的なイベント情報を取得しました。")
-
-    # データフレーム変換
-    df = pd.DataFrame(data)
-
-    # --- 1. 高機能地図 (Voyager) ---
-    st.subheader(f"📍 {region}周辺のイベントマップ")
-    st.caption(f"抽出件数: {len(data)}件")
-    
-    if not df.empty and 'lat' in df.columns and 'lon' in df.columns:
-        map_df = df.dropna(subset=['lat', 'lon'])
-        
-        if not map_df.empty:
-            view_state = pdk.ViewState(
-                latitude=map_df['lat'].mean(),
-                longitude=map_df['lon'].mean(),
-                zoom=13,
-                pitch=0,
-            )
-
-            layer = pdk.Layer(
-                "ScatterplotLayer",
-                map_df,
-                get_position='[lon, lat]',
-                get_color='[255, 75, 75, 160]',
-                get_radius=200,
-                pickable=True,
-            )
-
-            st.pydeck_chart(pdk.Deck(
-                map_style='https://basemaps.cartocdn.com/gl/voyager-gl-style/style.json',
-                initial_view_state=view_state,
-                layers=[layer],
-                tooltip={
-                    "html": "<b>{name}</b><br/>{place}<br/><i>{description}</i>",
-                    "style": {"backgroundColor": "steelblue", "color": "white"}
-                }
-            ))
-            st.caption("※地図上の赤い丸にマウスを乗せると詳細が表示されます。")
-            
-            # CSV作成
-            export_data = []
-            for _, row in map_df.iterrows():
-                gaiyou = f"【期間】{row.get('date_info')}\n{row.get('description')}"
-                export_data.append({
-                    "Name": row.get('name'),
-                    "住所": row.get('place'),
-                    "概要": gaiyou,
-                    "公式サイト": row.get('url', '')
-                })
-            
-            export_df = pd.DataFrame(export_data)
-            csv = export_df.to_csv(index=False).encode('utf-8_sig')
-
-            st.download_button(
-                label="📥 Googleマイマップ用CSVをダウンロード",
-                data=csv,
-                file_name=f"event_map_{region}.csv",
-                mime='text/csv',
-                help="このファイルをGoogleマイマップにインポートし、「住所」列を目印の場所に指定してください。"
-            )
+        if not data:
+            st.warning("ページからイベント情報を抽出できませんでした。")
+            st.stop()
         else:
-             st.info("※位置情報が特定できなかったため、地図には表示されませんが、以下のリストには表示されています。")
-    else:
-        st.warning("地図データが取得できませんでした。")
+            status_text.success(f"{len(data)}件のイベントを抽出しました！")
 
-    # --- 2. 速報テキストリスト ---
-    st.markdown("---")
-    st.subheader("📋 イベント情報一覧")
-    
-    for item in data:
-        url_text = "なし"
-        source_label = item.get('source_name', '掲載サイト')
+        # データフレーム変換
+        df = pd.DataFrame(data)
+
+        # --- 1. マップ表示 ---
+        st.subheader("📍 イベントマップ")
         
-        link_label = f"{source_label} で見る"
-        if source_label == "Google検索":
-            link_label = "🔍 Googleで再検索"
+        if not df.empty and 'lat' in df.columns and 'lon' in df.columns:
+            map_df = df.dropna(subset=['lat', 'lon'])
+            if not map_df.empty:
+                view_state = pdk.ViewState(
+                    latitude=map_df['lat'].mean(),
+                    longitude=map_df['lon'].mean(),
+                    zoom=11,
+                    pitch=0,
+                )
+                layer = pdk.Layer(
+                    "ScatterplotLayer",
+                    map_df,
+                    get_position='[lon, lat]',
+                    get_color='[255, 75, 75, 160]',
+                    get_radius=300,
+                    pickable=True,
+                )
+                st.pydeck_chart(pdk.Deck(
+                    map_style='https://basemaps.cartocdn.com/gl/voyager-gl-style/style.json',
+                    initial_view_state=view_state,
+                    layers=[layer],
+                    tooltip={"html": "<b>{name}</b><br/>{place}"}
+                ))
+        
+        # --- 2. リスト表示 ---
+        st.markdown("---")
+        st.subheader("📋 抽出されたイベントリスト")
+        
+        # CSVダウンロード用
+        csv = df.to_csv(index=False).encode('utf-8_sig')
+        st.download_button(
+            label="📥 CSVをダウンロード",
+            data=csv,
+            file_name="events_extracted.csv",
+            mime='text/csv'
+        )
 
-        if item.get('url'):
-            url_text = f"[🔗 {link_label}]({item.get('url')})"
+        for item in data:
+            # URLが相対パスなどの場合、元のURLを表示
+            link = item.get('url')
+            if not link or not link.startswith("http"):
+                link = target_url # 元ページへ誘導
 
-        st.markdown(f"""
-        - **期間**: {item.get('date_info')}
-        - **イベント名**: {item.get('name')}
-        - **場所**: {item.get('place')}
-        - **概要**: {item.get('description')}
-        - **ソース**: {url_text}
-        """)
+            st.markdown(f"""
+            - **期間**: {item.get('date_info')}
+            - **イベント名**: {item.get('name')}
+            - **場所**: {item.get('place')}
+            - **概要**: {item.get('description')}
+            - [🔗 情報元ページへ]({link})
+            """)
+
+    except Exception as e:
+        st.error(f"エラーが発生しました: {e}")
