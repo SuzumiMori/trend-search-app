@@ -224,4 +224,60 @@ if st.button("検索開始", type="primary"):
                     layers=[layer],
                     tooltip={
                         "html": "<b>{name}</b><br/>{place}<br/><i>{description}</i>",
-                        "
+                        "style": {"backgroundColor": "steelblue", "color": "white"}
+                    }
+                ))
+                st.caption("※地図上の赤い丸にマウスを乗せると詳細が表示されます。")
+                
+                # CSV作成
+                export_data = []
+                for _, row in map_df.iterrows():
+                    gaiyou = f"【期間】{row.get('date_info')}\n{row.get('description')}"
+                    export_data.append({
+                        "Name": row.get('name'),
+                        "住所": row.get('place'),
+                        "概要": gaiyou,
+                        "公式サイト": row.get('url', '')
+                    })
+                
+                export_df = pd.DataFrame(export_data)
+                csv = export_df.to_csv(index=False).encode('utf-8_sig')
+
+                st.download_button(
+                    label="📥 Googleマイマップ用CSVをダウンロード",
+                    data=csv,
+                    file_name=f"event_map_{region}.csv",
+                    mime='text/csv',
+                    help="このファイルをGoogleマイマップにインポートし、「住所」列を目印の場所に指定してください。"
+                )
+            else:
+                 st.info("※位置情報が特定できなかったため、地図には表示されませんが、以下のリストには表示されています。")
+        else:
+            st.warning("地図データが取得できませんでした。")
+
+        # --- 2. 速報テキストリスト ---
+        st.markdown("---")
+        st.subheader("📋 イベント情報一覧")
+        
+        for item in data:
+            url_text = "なし"
+            source_label = item.get('source_name', '掲載サイト')
+            
+            link_label = f"{source_label} で見る"
+            if source_label == "Google検索":
+                link_label = "🔍 Googleで再検索"
+
+            if item.get('url'):
+                url_text = f"[🔗 {link_label}]({item.get('url')})"
+
+            st.markdown(f"""
+            - **期間**: {item.get('date_info')}
+            - **イベント名**: {item.get('name')}
+            - **場所**: {item.get('place')}
+            - **概要**: {item.get('description')}
+            - **ソース**: {url_text}
+            """)
+
+    except Exception as e:
+        status_text.empty()
+        st.error(f"予期せぬエラーが発生しました: {e}")
