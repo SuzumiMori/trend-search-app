@@ -12,7 +12,7 @@ import pydeck as pdk
 st.set_page_config(page_title="トレンド・イベント検索", page_icon="🗺️")
 
 st.title("🗺️ トレンド・イベントMap検索")
-st.markdown("指定した地域の「現在開催中」または「今後オープン/開催予定」の最新情報を検索します。")
+st.markdown("信頼できる情報ソースから、**年号が一致する確実な情報のみ**を表示します。")
 
 # --- サイドバー: 設定エリア ---
 with st.sidebar:
@@ -20,7 +20,7 @@ with st.sidebar:
     st.markdown("### 📍 地域・場所")
     region = st.text_input("検索したい場所", value="東京都渋谷区", help="具体的な地名を入力してください。")
     
-    st.info("💡 期間指定をなくし、AIが「今話題」または「これから話題」になる情報を自動でピックアップします。")
+    st.info("💡 検索精度を高めるため、自動的に「今年」または「来年」の年号を含む記事のみを厳選します。")
 
 # --- メインエリア ---
 
@@ -34,45 +34,47 @@ if st.button("検索開始", type="primary"):
     # 検索処理
     client = genai.Client(api_key=api_key)
     status_text = st.empty()
-    status_text.info(f"🔍 {region}の最新トレンド情報を収集中... (開催中・オープン予定)")
-
-    # 今日の日付
-    today = datetime.date.today()
     
+    # 今日の日付とターゲット年
+    today = datetime.date.today()
+    target_year = today.year
+    
+    status_text.info(f"🔍 {region}の情報を検索中... ({target_year}年の記事のみを厳選)")
+
     # 信頼できるサイトドメイン
     trusted_sites = "site:fashion-press.net OR site:prtimes.jp OR site:walkerplus.com OR site:timeout.jp OR site:entabe.jp OR site:event-checker.info"
 
-    # プロンプト (期間縛りをなくし、状態(開催中/予定)で探させる)
+    # プロンプト
     prompt = f"""
     あなたは「Web検索結果からのデータ抽出ロボット」です。
-    以下の検索クエリでGoogle検索を行い、**「現在開催中」**または**「今後開催/オープン予定」**の具体的な情報を抽出してください。
+    以下の検索クエリでGoogle検索を行い、**「{target_year}年」に開催/オープン**される情報を抽出してください。
 
     【検索クエリ】
-    「{region} イベント 開催中 {trusted_sites}」
-    「{region} イベント 開催予定 {trusted_sites}」
-    「{region} 新規オープン 予定 {trusted_sites}」
-    「{region} 限定メニュー 発売 {trusted_sites}」
+    「{region} イベント {target_year}年 開催中 {trusted_sites}」
+    「{region} イベント {target_year}年 開催予定 {trusted_sites}」
+    「{region} 新規オープン {target_year}年 {trusted_sites}」
 
     【基準日】
     本日は {today} です。これより過去に終了したイベントは除外してください。
 
-    【厳守ルール】
-    1. **具体的でない情報は破棄してください。** (例: 名前が「イベント」だけ、場所が「渋谷」だけのものは不可)
-    2. **記事一覧ページやタグ一覧ページのURLは禁止です。** 必ず個別の記事URLを採用してください。
-    3. 情報が見つからない場合は無理に埋めず、件数が少なくても確実なものだけを出力してください。
-    4. 店名やイベント名が「unknown」や「不明」になるものは出力しないでください。
+    【厳守ルール：年号チェック】
+    1. **記事のタイトルや本文に「{target_year}」または「{target_year}年」という表記が明確にあるものだけを選んでください。**
+    2. 年号が見つからない、または去年の年号の記事は絶対に含めないでください。
+    3. URLは検索結果のものをそのまま使用してください。捏造禁止。
+    4. 該当情報がない場合は、空のリスト `[]` を返してください。
 
     【出力形式（JSONのみ）】
     [
         {{
             "type": "種別(新メニュー/オープン/イベント)",
-            "name": "店名またはイベント名(必須)",
-            "place": "具体的な場所(必須)",
-            "start_date": "YYYY-MM-DD (不明ならnull)",
-            "end_date": "YYYY-MM-DD (不明ならnull)",
+            "name": "店名またはイベント名",
+            "place": "具体的な場所",
+            "start_date": "YYYY-MM-DD",
+            "end_date": "YYYY-MM-DD",
             "description": "概要",
             "source_name": "サイト名",
             "url": "記事のURL",
+            "found_year": "記事内で確認できた年号(例: 2025)",
             "lat": 緯度(数値),
             "lon": 経度(数値)
         }}
@@ -87,7 +89,7 @@ if st.button("検索開始", type="primary"):
             config=types.GenerateContentConfig(
                 tools=[types.Tool(google_search=types.GoogleSearch())],
                 response_mime_type="application/json",
-                temperature=0.0  # 嘘をつかせない
+                temperature=0.0
             )
         )
 
@@ -111,24 +113,52 @@ if st.button("検索開始", type="primary"):
             except:
                 pass
         
-        # --- クリーニング処理（変なデータを除去） ---
+        # --- ★最強のフィルタリング処理 ---
+        # AIが持ってきたデータでも、年号が間違っていたらここで捨てる
         cleaned_data = []
         for item in data:
-            # 名前がunknown、あるいは空欄のものは捨てる
+            # 1. 名前がないものは捨てる
             name = item.get('name', '').lower()
-            if not name or name == 'unknown' or name == 'イベント' or name == '情報なし':
+            if not name or name in ['unknown', 'イベント', '情報なし']:
                 continue
-            # URLがないものも捨てる
+            
+            # 2. URLがないものは捨てる
             if not item.get('url'):
                 continue
-            cleaned_data.append(item)
+
+            # 3. 【重要】年号チェック
+            # AIが報告してきた「found_year」か、日付データの中に「ターゲット年」が含まれているか確認
+            is_valid_year = False
+            
+            # AIが報告した年号をチェック
+            found_year_str = str(item.get('found_year', ''))
+            if str(target_year) in found_year_str:
+                is_valid_year = True
+            
+            # 開始日の中に年号が含まれているかチェック
+            elif item.get('start_date') and str(target_year) in str(item.get('start_date')):
+                is_valid_year = True
+
+            # 4. 過去の日付チェック (終了日が昨日より前のものは捨てる)
+            is_future = True
+            if item.get('end_date'):
+                try:
+                    e_date_obj = datetime.datetime.strptime(item.get('end_date'), "%Y-%m-%d").date()
+                    if e_date_obj < today:
+                        is_future = False
+                except:
+                    pass # 日付変換エラーならスルー
+
+            # 合格したものだけ残す
+            if is_valid_year and is_future:
+                cleaned_data.append(item)
             
         data = cleaned_data
 
         # データが空だった場合
         if not data:
-            st.warning(f"⚠️ {region} エリアの最新情報は、信頼できるソースからは見つかりませんでした。")
-            st.info("💡 ヒント: エリア名を「渋谷区」から「渋谷」や「表参道」のように変えると見つかる場合があります。")
+            st.warning(f"⚠️ {target_year}年の最新情報は、現在信頼できるソースからは見つかりませんでした。")
+            st.info(f"💡 AIはいくつかの候補を見つけましたが、{target_year}年の確証が得られなかったため除外しました。")
             st.stop()
 
         # --- 期間表示用の整形処理 ---
@@ -136,7 +166,6 @@ if st.button("検索開始", type="primary"):
             s_date = item.get('start_date')
             e_date = item.get('end_date')
             
-            # 日付が入っていない場合の処理
             if not s_date:
                 item['display_date'] = "開催中/近日"
             elif s_date and e_date:
@@ -151,7 +180,7 @@ if st.button("検索開始", type="primary"):
         df = pd.DataFrame(data)
 
         # --- 1. 高機能地図 (Voyager) ---
-        st.subheader(f"📍 {region}周辺のトレンドマップ")
+        st.subheader(f"📍 {region}周辺のトレンドマップ ({target_year}年版)")
         
         if not df.empty and 'lat' in df.columns and 'lon' in df.columns:
             map_df = df.dropna(subset=['lat', 'lon'])
