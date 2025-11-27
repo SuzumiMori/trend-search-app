@@ -7,12 +7,13 @@ import json
 import pandas as pd
 import re
 import pydeck as pdk
+import urllib.parse # URL解析用
 
 # ページの設定
 st.set_page_config(page_title="トレンド・イベント検索", page_icon="🗺️")
 
 st.title("🗺️ トレンド・イベントMap検索")
-st.markdown("大手イベント情報サイト（Enjoy Tokyo, Walkerplusなど）のリストから情報を一括抽出します。")
+st.markdown("信頼できる大手情報サイトから、安全なリンクのみを厳選して表示します。")
 
 # --- サイドバー: 設定エリア ---
 with st.sidebar:
@@ -20,7 +21,7 @@ with st.sidebar:
     st.markdown("### 📍 地域・場所")
     region = st.text_input("検索したい場所", value="東京都渋谷区", help="具体的な地名を入力してください。")
     
-    st.info("💡 ヒット件数を増やすため、まとめサイトのリスト情報をそのまま抽出します。")
+    st.info("💡 リンク切れを防ぐため、公式サイトや大手メディアの正しいURLのみを表示します。")
 
 # --- メインエリア ---
 
@@ -34,41 +35,51 @@ if st.button("検索開始", type="primary"):
     # 検索処理
     client = genai.Client(api_key=api_key)
     status_text = st.empty()
-    status_text.info(f"🔍 {region}のイベント情報を、まとめサイトから一括収集中...")
+    status_text.info(f"🔍 {region}のイベント情報を収集中... (URLの安全性チェック中)")
 
-    # 今日の日付
-    today = datetime.date.today()
+    # 許可するドメイン（ホワイトリスト）
+    # ここに含まれないドメインのURLは「怪しい」とみなして弾きます
+    VALID_DOMAINS = [
+        "walkerplus.com",
+        "enjoytokyo.jp",
+        "rurubu.jp",
+        "jorudan.co.jp",
+        "fashion-press.net",
+        "prtimes.jp",
+        "timeout.jp",
+        "event-checker.info",
+        "entabe.jp",
+        "lmaga.jp",      # 関西系に強い
+        "letsenjoytokyo.jp"
+    ]
+
+    # プロンプト
+    target_sites = " OR ".join([f"site:{d}" for d in VALID_DOMAINS])
     
-    # 検索対象（リスト形式で情報を持っているサイト）
-    target_sites = "site:enjoytokyo.jp OR site:walkerplus.com OR site:rurubu.jp OR site:jorudan.co.jp OR site:event-checker.info OR site:fashion-press.net"
-
-    # プロンプト (まとめサイトのリスト読み取りに特化)
     prompt = f"""
-    あなたは「イベント情報リストの抽出ロボット」です。
-    以下の検索クエリでGoogle検索を行い、検索結果に出てくる**イベント情報まとめサイトのリスト**から、現在開催中または今後開催のイベントを可能な限り多く抽出してください。
+    あなたは「イベント情報抽出のプロ」です。
+    以下の検索クエリでGoogle検索を行い、**現在開催中**または**今後開催予定**のイベント情報を抽出してください。
 
     【検索クエリ】
     「{region} イベント一覧 開催中 {target_sites}」
-    「{region} イベント一覧 今後 {target_sites}」
-    「{region} 新店 オープン情報 {target_sites}」
+    「{region} 新規オープン 予定 {target_sites}」
 
-    【抽出ルール（重要）】
-    1. **URLについて**: 個別のイベント詳細ページを探す必要はありません。**「情報を見つけたまとめサイトのURL（検索結果のURL）」をそのまま `url` 欄に入れてください。**
-       (これでリンク切れを防ぎます)
-    2. **件数について**: 検索結果のスニペットに表示されているイベント名はすべて拾ってください。目標は10件以上です。
-    3. **実在性**: まとめサイトに掲載されているものだけを抽出してください。創作禁止。
+    【厳守ルール】
+    1. **実在する正しいURLのみ抽出してください。** `kanko.walkerplus.com` のような架空のサブドメインは絶対に禁止です。
+    2. URLが不明確な場合は `null` にしてください。
+    3. イベント名は正確に拾ってください。「unknown」は禁止です。
 
     【出力形式（JSONのみ）】
     [
         {{
             "name": "イベント名",
-            "place": "開催場所(施設名など)",
+            "place": "開催場所",
             "date_info": "期間(例: 開催中〜12/25)",
-            "description": "概要(短くてOK)",
-            "source_name": "掲載サイト名(例: Enjoy Tokyo)",
-            "url": "その情報が載っているまとめサイトのURL",
-            "lat": 緯度(数値・不明ならエリア中心),
-            "lon": 経度(数値・不明ならエリア中心)
+            "description": "概要",
+            "source_name": "サイト名",
+            "url": "記事のURL",
+            "lat": 緯度(数値),
+            "lon": 経度(数値)
         }}
     ]
     """
@@ -90,7 +101,6 @@ if st.button("検索開始", type="primary"):
         # --- JSONデータの抽出 ---
         text = response.text.replace("```json", "").replace("```", "").strip()
         data = []
-        
         try:
             data = json.loads(text)
         except json.JSONDecodeError as e:
@@ -100,21 +110,51 @@ if st.button("検索開始", type="primary"):
                 else:
                     match = re.search(r'\[.*\]', text, re.DOTALL)
                     if match:
-                        candidate = match.group(0)
-                        data = json.loads(candidate)
+                        data = json.loads(match.group(0))
             except:
                 pass
         
-        # クリーニング
+        # --- ★URL検問（ホワイトリスト・チェック） ---
         cleaned_data = []
         for item in data:
-            if not item.get('name') or item.get('name') in ['unknown', '情報なし']:
+            name = item.get('name', '')
+            url = item.get('url', '')
+            
+            # 1. 名前チェック
+            if not name or name.lower() in ['unknown', 'イベント', '情報なし']:
                 continue
+            
+            # 2. URLドメインチェック
+            is_valid_url = False
+            if url and url.startswith("http"):
+                try:
+                    domain = urllib.parse.urlparse(url).netloc
+                    # ホワイトリストのいずれかがドメインに含まれているか
+                    for valid_d in VALID_DOMAINS:
+                        if valid_d in domain:
+                            is_valid_url = True
+                            break
+                    
+                    # 特定の幻覚URLは名指しで排除
+                    if "kanko.walkerplus" in url:
+                        is_valid_url = False
+                        
+                except:
+                    is_valid_url = False
+            
+            # URLが怪しい場合の救済措置
+            # URLを削除するのではなく、「Google検索結果へのリンク」に差し替える
+            if not is_valid_url:
+                search_query = f"{item['name']} {item['place']} イベント"
+                item['url'] = f"https://www.google.com/search?q={urllib.parse.quote(search_query)}"
+                item['source_name'] = "Google検索" # ソース名も変更
+            
             cleaned_data.append(item)
+            
         data = cleaned_data
 
         if not data:
-            st.warning(f"⚠️ 情報が見つかりませんでした。")
+            st.warning(f"⚠️ 信頼できる情報が見つかりませんでした。")
             st.stop()
 
         # データフレーム変換
@@ -122,7 +162,6 @@ if st.button("検索開始", type="primary"):
 
         # --- 1. 高機能地図 (Voyager) ---
         st.subheader(f"📍 {region}周辺のイベントマップ")
-        st.caption(f"抽出件数: {len(data)}件")
         
         if not df.empty and 'lat' in df.columns and 'lon' in df.columns:
             map_df = df.dropna(subset=['lat', 'lon'])
@@ -178,21 +217,23 @@ if st.button("検索開始", type="primary"):
                 )
             else:
                  st.warning("位置情報が取得できませんでした（リストのみ表示します）")
-        else:
-            st.warning("地図データが取得できませんでした。")
 
         # --- 2. 速報テキストリスト ---
         st.markdown("---")
         st.subheader("📋 イベント情報一覧")
-        st.caption("※リンク先は情報元のまとめサイト等です。")
+        st.caption("※リンク先で詳細をご確認ください。")
         
         for item in data:
             url_text = "なし"
-            source_label = item.get('source_name', '掲載サイト')
+            source_label = item.get('source_name', '詳細')
             
+            # Google検索リンクに差し替わった場合の表記
+            link_label = f"{source_label} で確認"
+            if source_label == "Google検索":
+                link_label = "🔍 Googleで再検索"
+
             if item.get('url'):
-                # リンク先がまとめサイトであることを明示
-                url_text = f"[🔗 {source_label} で一覧を見る]({item.get('url')})"
+                url_text = f"[🔗 {link_label}]({item.get('url')})"
 
             st.markdown(f"""
             - **期間**: {item.get('date_info')}
