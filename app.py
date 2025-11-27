@@ -14,7 +14,7 @@ import time
 st.set_page_config(page_title="トレンド・イベント検索", page_icon="🗺️")
 
 st.title("🗺️ トレンド・イベントMap検索")
-st.markdown("信頼できる情報サイトから、「期間限定のイベント」や「新店情報」のみを厳選して抽出します。")
+st.markdown("主要メディアの「ニュース記事」「イベント詳細ページ」のみを対象に検索します。")
 
 # --- サイドバー: 設定エリア ---
 with st.sidebar:
@@ -23,25 +23,27 @@ with st.sidebar:
     region = st.text_input("検索したい場所", value="東京都渋谷区", help="具体的な地名を入力してください。")
     
     st.markdown("---")
-    st.markdown("### 🌐 検索対象サイト")
+    st.markdown("### 🌐 検索対象ソース")
     
-    SITE_DOMAINS = {
-        "Walkerplus": "walkerplus.com",
-        "GO TOKYO": "gotokyo.org",
-        "Let's Enjoy Tokyo": "enjoytokyo.jp",
-        "Fashion Press": "fashion-press.net",
-        "TimeOut Tokyo": "timeout.jp",
-        "Jorudan": "jorudan.co.jp",
-        "PR TIMES": "prtimes.jp"
+    # ★ここが重要: ドメインではなく「ニュース記事・イベント情報のパス」を指定
+    # site:コマンドでこのパスを指定すると、用語集(/words/)や施設情報(/spot/)はヒットしなくなります
+    SITE_PATHS = {
+        "Fashion Press (ニュース)": "fashion-press.net/news/",
+        "Walkerplus (イベント記事)": "walkerplus.com/article/",
+        "Walkerplus (イベントリスト)": "walkerplus.com/event_list/",
+        "Let's Enjoy Tokyo (イベント)": "enjoytokyo.jp/event/",
+        "TimeOut Tokyo (ガイド)": "timeout.jp/tokyo/ja/things-to-do/",
+        "PR TIMES (プレスリリース)": "prtimes.jp/main/html/rd/p/",
+        "FASHIONSNAP (ニュース)": "fashionsnap.com/article/"
     }
     
-    selected_sites = st.multiselect(
-        "情報を取得するサイト（複数可）",
-        options=list(SITE_DOMAINS.keys()),
-        default=["Walkerplus", "Let's Enjoy Tokyo", "Fashion Press"]
+    selected_labels = st.multiselect(
+        "検索対象（複数選択可）",
+        options=list(SITE_PATHS.keys()),
+        default=["Fashion Press (ニュース)", "Walkerplus (イベント記事)", "Let's Enjoy Tokyo (イベント)"]
     )
     
-    st.info("💡 施設そのものの紹介（スポット情報）は自動的に除外します。")
+    st.info("💡 用語集や施設紹介ページを除外し、最新の「記事」のみを検索します。")
 
 # --- メインエリア ---
 
@@ -53,46 +55,50 @@ if st.button("検索開始", type="primary"):
         st.error("⚠️ APIキーが設定されていません。")
         st.stop()
 
-    if not selected_sites:
-        st.error("⚠️ 検索対象サイトを少なくとも1つ選択してください。")
+    if not selected_labels:
+        st.error("⚠️ 検索対象を少なくとも1つ選択してください。")
         st.stop()
 
     try:
         # 検索処理準備
         client = genai.Client(api_key=api_key)
         status_text = st.empty()
-        status_text.info(f"🔍 {region}のイベント情報を収集中... (常設施設の除外処理中)")
+        status_text.info(f"🔍 {region}のイベント情報を収集中... (ノイズ除去・記事限定検索)")
 
-        target_domains = [SITE_DOMAINS[name] for name in selected_sites]
-        site_query = " OR ".join([f"site:{d}" for d in target_domains])
+        # 選択されたパスをリスト化
+        target_paths = [SITE_PATHS[label] for label in selected_labels]
+        
+        # 検索クエリ作成
+        # site:fashion-press.net/news/ のようにパス付きで指定
+        site_query = " OR ".join([f"site:{path}" for path in target_paths])
         
         today = datetime.date.today()
         
-        # ★ここが重要: 検索クエリを「期間限定」寄りに修正
+        # プロンプト
         prompt = f"""
-        あなたは「イベント情報の選別ロボット」です。
-        以下の検索クエリを使い、Google検索結果から**期間限定のイベント**や**新規オープン**の情報だけを抽出してください。
+        あなたは「イベントニュースの収集ロボット」です。
+        以下の検索クエリを使い、Google検索結果に表示される**具体的なイベント記事**から情報を抽出してください。
 
         【検索クエリ】
-        「{region} イベント 期間限定 {site_query}」
-        「{region} フェスティバル 開催 {site_query}」
-        「{region} 新規オープン {site_query}」
-        「{region} 展覧会 開催 {site_query}」
+        「{region} イベント 開催中 {site_query}」
+        「{region} 新規オープン 決定 {site_query}」
+        「{region} 期間限定 {site_query}」
 
         【基準日】
-        本日は {today} です。終了したイベントは除外してください。
+        本日は {today} です。終了済みのイベントは除外してください。
 
-        【厳守ルール：施設紹介の排除】
-        1. **ただの「施設紹介」は絶対に含めないでください。**
-           × 悪い例: 「明治神宮」「代々木公園」「渋谷ヒカリエ」 (これらは場所でありイベントではありません)
-           ○ 良い例: 「明治神宮 秋の大祭」「代々木公園 わんわんカーニバル」「渋谷ヒカリエ クリスマスマーケット」
-        2. **URL**: 検索結果の**記事URL**をそのまま使用してください。
+        【厳守ルール】
+        1. **「記事ページ」のみ抽出**: 
+           - Fashion Pressの「用語集(/words/)」や「ブランド情報(/brand/)」は絶対に含めないでください。
+           - 施設の「場所紹介(/spot/)」ページも含めないでください。
+           - ニュース、レポート、イベント詳細ページのみ対象です。
+        2. **URL**: 検索結果に表示されている**記事の個別URL**を使用してください。
         3. **件数**: 最大20件抽出してください。
 
         【出力形式（JSONのみ）】
         [
             {{
-                "name": "イベント名(必須)",
+                "name": "イベント名",
                 "place": "開催場所",
                 "date_info": "期間(例: 11/1〜12/25)",
                 "description": "概要(短くてOK)",
@@ -153,42 +159,41 @@ if st.button("検索開始", type="primary"):
             except:
                 pass
         
-        # --- クリーニング & 施設除外ロジック ---
+        # --- クリーニング & URL物理フィルタリング ---
         cleaned_data = []
         for item in data:
             name = item.get('name', '')
-            place = item.get('place', '')
             url = item.get('url', '')
             
-            # 1. 名前がない、unknown等は削除
+            # 1. 名前チェック
             if not name or name.lower() in ['unknown', 'イベント']:
                 continue
             
-            # 2. ★重要: 「イベント名」と「場所名」が酷似している場合は「施設紹介」とみなして削除
-            # 例: name="代々木公園", place="代々木公園" -> 削除
-            if name.replace(" ", "") == place.replace(" ", ""):
-                continue
-
-            # 3. URLチェック
-            is_valid_source = False
-            if url and url.startswith("http"):
-                for domain in target_domains:
-                    if domain in url:
-                        is_valid_source = True
-                        break
+            # 2. URLチェック (ノイズURLを物理的に弾く)
+            # Fashion Pressの words(用語集), brand(ブランド紹介), collection(コレクション写真) などを除外
+            if "fashion-press.net/words" in url: continue
+            if "fashion-press.net/brand" in url: continue
+            if "fashion-press.net/collections" in url: continue
+            if "enjoytokyo.jp/spot" in url: continue # ただの施設紹介を除外
             
-            if not is_valid_source:
-                search_query = f"{item['name']} {item['place']} イベント"
-                item['url'] = f"https://www.google.com/search?q={urllib.parse.quote(search_query)}"
-                item['source_name'] = "Google検索"
+            # 3. 指定したパスが含まれているか確認
+            # (検索結果から変なリダイレクトURLなどを拾った場合の対策)
+            is_valid_path = False
+            for path in target_paths:
+                # 検索時は site:fashion-press.net/news/ だが、URLは https://... なのでドメイン部分で判定
+                clean_path = path.replace("/", "") # 簡易一致
+                if path.split('/')[0] in url: 
+                    is_valid_path = True
+                    break
             
-            cleaned_data.append(item)
+            if is_valid_path:
+                cleaned_data.append(item)
             
         data = cleaned_data
 
         if not data:
-            st.warning(f"⚠️ 期間限定のイベントは見つかりませんでした。")
-            st.info("「検索対象サイト」を変更するか、エリアを変えてみてください。")
+            st.warning(f"⚠️ 検索条件に合うイベント記事が見つかりませんでした。")
+            st.info("別のサイトを選択するか、エリアを変えてみてください。")
             st.stop()
 
         # データフレーム変換
