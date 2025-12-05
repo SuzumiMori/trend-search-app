@@ -16,7 +16,7 @@ import re
 st.set_page_config(page_title="トレンド・イベント検索", page_icon="📖", layout="wide")
 
 st.title("📖 イベント情報「完全救出」抽出アプリ")
-st.markdown("Webページを読み込み、**手持ちのCSVにない新しい情報のみ**を抽出します。大量データ対応版。")
+st.markdown("Webページを読み込み、**手持ちのCSVにない新しい情報のみ**を抽出します。カテゴリ指定対応版。")
 
 # --- ユーティリティ関数 ---
 
@@ -49,19 +49,18 @@ def safe_json_parse(json_str):
         return json.loads(json_str)
     except json.JSONDecodeError:
         # 失敗した場合（途中で切れている場合）
-        # 文字列を後ろから探索し、最後の閉じ括弧 '}' を探す
         try:
             last_brace_index = json_str.rfind("}")
             if last_brace_index == -1:
-                return [] # 有効なデータなし
+                return [] 
             
             # 最後の '}' までを切り取り、リストの閉じ括弧 ']' を補完する
             repaired_json = json_str[:last_brace_index+1] + "]"
             return json.loads(repaired_json)
         except:
-            return [] # 修復不可能なら空リスト
+            return []
 
-def split_text_into_chunks(text, chunk_size=30000, overlap=2000):
+def split_text_into_chunks(text, chunk_size=30000, overlap=1000):
     """テキストをオーバーラップ付きで分割するジェネレータ"""
     start = 0
     text_len = len(text)
@@ -80,18 +79,33 @@ if 'last_update' not in st.session_state:
 with st.sidebar:
     st.header("1. 読み込み対象")
     
+    # 画像のURLリストを元にプリセットを再構築
     PRESET_URLS = {
-        "PRTIMES (最新プレスリリース)": "https://prtimes.jp/"
+        # PR TIMES
+        "PRTIMES (グルメ)": "https://prtimes.jp/gourmet/",
+        "PRTIMES (ビジネス)": "https://prtimes.jp/business/",
+        "PRTIMES (ライフスタイル)": "https://prtimes.jp/lifestyle/",
+        "PRTIMES (ファッション)": "https://prtimes.jp/fashion/",
+        "PRTIMES (ビューティ)": "https://prtimes.jp/beauty/",
+        "PRTIMES (エンタメ)": "https://prtimes.jp/entertainment/",
+        
+        # AtPress
+        "AtPress (新着ニュース)": "https://www.atpress.ne.jp/news",
+        "AtPress (ランキング)": "https://www.atpress.ne.jp/service/release_ranking",
+        "AtPress (エンタメ)": "https://www.atpress.ne.jp/news/entertainment",
+        "AtPress (グルメ)": "https://www.atpress.ne.jp/news/food",
+        "AtPress (旅行・観光)": "https://www.atpress.ne.jp/news/travel",
+        "AtPress (ファッション)": "https://www.atpress.ne.jp/news/fashion"
     }
     
     selected_presets = st.multiselect(
         "サイトを選択",
         options=list(PRESET_URLS.keys()),
-        default=["PRTIMES (最新プレスリリース)"]
+        default=["PRTIMES (グルメ)", "AtPress (グルメ)"]
     )
 
     st.markdown("### 🔗 カスタムURL")
-    custom_urls_text = st.text_area("その他のURL (1行に1つ)", height=100, help="https://www.atpress.ne.jp/ など")
+    custom_urls_text = st.text_area("その他のURL (1行に1つ)", height=100, help="特定のカテゴリページURLを入力すると精度が上がります。")
     
     st.markdown("---")
     st.markdown("### 2. 既存データ除外 (オプション)")
@@ -176,16 +190,21 @@ if st.button("一括読み込み開始", type="primary"):
             for tag in soup(["script", "style", "nav", "footer", "iframe", "header", "noscript", "form", "svg"]):
                 tag.decompose()
             
-            # 本文取得
+            # クラス名除外 (sidebar, ranking等)
+            exclude_keywords = ['sidebar', 'side-bar', 'ranking', 'recommend', 'widget', 'advertisement', 'pankuzu', 'breadcrumb']
+            for tag in soup.find_all(attrs={"class": True}):
+                classes = tag.get("class")
+                if isinstance(classes, list): classes = " ".join(classes).lower()
+                if any(k in classes for k in exclude_keywords): tag.decompose()
+            
             full_text = soup.get_text(separator="\n", strip=True)
             
             # --- 分割処理 (Chunking) + 自動修復 ---
-            # 30,000文字ごとに分割してリクエストを送る
             chunks = list(split_text_into_chunks(full_text, chunk_size=30000, overlap=1000))
             
             chunk_results = []
-            
             chunk_progress = st.progress(0)
+            
             for cid, chunk_text in enumerate(chunks):
                 chunk_progress.progress((cid + 1) / len(chunks))
                 
@@ -227,9 +246,8 @@ if st.button("一括読み込み開始", type="primary"):
                         )
                     )
                     
-                    # ★ここでエラー修復関数を通す
+                    # 自動修復パース
                     extracted = safe_json_parse(ai_response.text)
-                    
                     if isinstance(extracted, list):
                         chunk_results.extend(extracted)
                         
@@ -237,7 +255,7 @@ if st.button("一括読み込み開始", type="primary"):
                     print(f"Chunk error: {e}")
                     continue
                 
-                time.sleep(1) # APIレート制限対策
+                time.sleep(1)
 
             chunk_progress.empty()
 
@@ -245,13 +263,11 @@ if st.button("一括読み込み開始", type="primary"):
             seen_in_page = set()
             
             for item in chunk_results:
-                # ページ内重複排除
                 n_key = normalize_string(item.get('name', ''))
                 if not n_key or n_key in seen_in_page:
                     continue
                 seen_in_page.add(n_key)
 
-                # CSV重複チェック
                 p_key = normalize_string(item.get('place', ''))
                 is_in_csv = False
                 if (n_key, p_key) in existing_fingerprints:
@@ -284,7 +300,6 @@ if st.button("一括読み込み開始", type="primary"):
         st.error("情報が見つかりませんでした。")
         st.session_state.extracted_data = None
     else:
-        # 最終重複排除
         unique_data = []
         seen_keys = set()
         for item in all_data:
