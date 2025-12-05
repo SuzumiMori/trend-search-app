@@ -15,8 +15,8 @@ import re
 # ページの設定
 st.set_page_config(page_title="トレンド・イベント検索", page_icon="📖", layout="wide")
 
-st.title("📖 イベント情報「完全網羅」抽出アプリ")
-st.markdown("Webページを分割して読み込み、**手持ちのCSVにない新しい情報のみ**を漏らさず抽出します。")
+st.title("📖 イベント情報「完全抽出」アプリ")
+st.markdown("Webページを読み込み、**手持ちのCSVにない新しい情報のみ**を抽出します。")
 
 # --- ユーティリティ関数 ---
 
@@ -31,28 +31,13 @@ def normalize_date(text):
 
 def normalize_string(text):
     """
-    文字列比較用の正規化関数（推測用）
-    スペース削除、全角半角統一、小文字化を行い、揺らぎを吸収する
+    文字列比較用の正規化関数
     """
     if not isinstance(text, str):
         return ""
     text = text.replace(" ", "").replace("　", "")
     text = text.replace("（", "").replace("）", "").replace("(", "").replace(")", "")
     return text.lower()
-
-def split_text_into_chunks(text, chunk_size=15000, overlap=1000):
-    """
-    テキストを指定サイズで分割するジェネレータ。
-    情報の分断を防ぐため、overlap文字分だけ前後のチャンクを重複させる。
-    """
-    start = 0
-    text_len = len(text)
-    
-    while start < text_len:
-        end = start + chunk_size
-        yield text[start:end]
-        # 次の開始位置は、現在の終了位置からoverlapを引いた場所（重複させる）
-        start = end - overlap
 
 # --- Session State ---
 if 'extracted_data' not in st.session_state:
@@ -64,7 +49,6 @@ if 'last_update' not in st.session_state:
 with st.sidebar:
     st.header("1. 読み込み対象")
     
-    # プリセットはPRTIMESのみ
     PRESET_URLS = {
         "PRTIMES (最新プレスリリース)": "https://prtimes.jp/"
     }
@@ -76,19 +60,17 @@ with st.sidebar:
     )
 
     st.markdown("### 🔗 カスタムURL")
-    custom_urls_text = st.text_area("その他のURL (1行に1つ)", height=100, help="https://www.atpress.ne.jp/ など、解析したい他のURLを入力してください。")
+    custom_urls_text = st.text_area("その他のURL (1行に1つ)", height=100, help="https://www.atpress.ne.jp/ など")
     
     st.markdown("---")
     st.markdown("### 2. 既存データ除外 (オプション)")
-    uploaded_file = st.file_uploader("過去に取得したCSVをアップロード", type="csv", help="ここにCSVをアップすると、そこに載っているイベントは検索結果から除外されます（差分のみ表示）。")
+    uploaded_file = st.file_uploader("過去CSVをアップロード (除外用)", type="csv")
     
-    # 既存データの読み込み処理
     existing_fingerprints = set()
     if uploaded_file is not None:
         try:
             existing_df = pd.read_csv(uploaded_file)
             count = 0
-            # CSVのカラム名が多少違っても対応できるように探す
             name_col = next((col for col in existing_df.columns if 'イベント名' in col or 'Name' in col), None)
             place_col = next((col for col in existing_df.columns if '場所' in col or 'Place' in col), None)
 
@@ -96,18 +78,17 @@ with st.sidebar:
                 for _, row in existing_df.iterrows():
                     n = normalize_string(row[name_col])
                     p = normalize_string(row[place_col]) if place_col else ""
-                    # 「イベント名」と「場所」の組み合わせを指紋として登録
                     existing_fingerprints.add((n, p))
                     count += 1
-                st.success(f"📚 既存データ {count}件 を読み込みました。これらは結果から除外されます。")
+                st.success(f"📚 既存データ {count}件 を読み込みました。")
             else:
-                st.error("CSVに「イベント名」または「Name」列が見つかりません。")
+                st.error("CSVに「イベント名」列が見つかりません。")
         except Exception as e:
             st.error(f"CSV読み込みエラー: {e}")
 
 # --- メインエリア ---
 
-if st.button("一括読み込み開始 (完全網羅モード)", type="primary"):
+if st.button("一括読み込み開始", type="primary"):
     try:
         api_key = st.secrets["GOOGLE_API_KEY"]
     except:
@@ -139,7 +120,6 @@ if st.button("一括読み込み開始 (完全網羅モード)", type="primary")
     progress_bar = st.progress(0)
     status_text = st.empty()
     total_urls = len(targets)
-    
     skipped_count_duplicate_csv = 0
     
     # --- ループ処理 ---
@@ -161,115 +141,110 @@ if st.button("一括読み込み開始 (完全網羅モード)", type="primary")
 
             soup = BeautifulSoup(response.text, "html.parser")
             
-            # ノイズ除去
-            for script in soup(["script", "style", "nav", "footer", "iframe", "header", "noscript", "form"]):
-                script.decompose()
+            # --- 【重要】徹底的なノイズ除去 ---
+            # 記事一覧以外の要素（ランキング、サイドバー、フッター、広告）をHTML構造から削除し、
+            # AIに渡すテキストを「メインコンテンツ」のみに絞り込む
             
-            # テキスト全体を取得（最大50万文字まで拡張）
-            full_text = soup.get_text(separator="\n", strip=True)[:500000]
+            # 1. 基本的な不要タグ削除
+            for tag in soup(["script", "style", "nav", "footer", "iframe", "header", "noscript", "form", "svg"]):
+                tag.decompose()
             
-            # --- ★ここから分割処理 (Chunking) ---
-            # テキストを15,000文字ずつのブロックに分割して処理する
-            # ※ 一度に投げるとAIが途中を省略してしまうため
-            chunks = list(split_text_into_chunks(full_text, chunk_size=15000, overlap=1000))
+            # 2. クラス名やIDによる不要エリアの推定削除
+            # (PRTIMESやAtPressのサイドバーやランキングを除外してトークンを節約)
+            exclude_keywords = ['sidebar', 'side-bar', 'ranking', 'recommend', 'widget', 'advertisement', 'pankuzu', 'breadcrumb']
+            for tag in soup.find_all(attrs={"class": True}):
+                classes = tag.get("class")
+                if isinstance(classes, list):
+                    classes = " ".join(classes).lower()
+                if any(k in classes for k in exclude_keywords):
+                    tag.decompose()
             
-            chunk_results = []
+            for tag in soup.find_all(attrs={"id": True}):
+                ids = tag.get("id").lower()
+                if any(k in ids for k in exclude_keywords):
+                    tag.decompose()
+
+            # --- テキスト抽出 ---
+            # separator="\n" を指定することで、記事タイトルと日付などがくっつくのを防ぐ
+            page_text = soup.get_text(separator="\n", strip=True)
             
-            # 分割したブロックごとにAIへ問い合わせ
-            chunk_progress = st.progress(0)
-            for cid, chunk_text in enumerate(chunks):
-                # サブプログレスバー更新
-                chunk_progress.progress((cid + 1) / len(chunks))
-                
-                prompt = f"""
-                あなたは完璧なデータ抽出マシンです。
-                以下のWebページのテキスト（断片）から、全ての「イベント情報」または「プレスリリース」を抽出し、JSONリストで出力してください。
-                **省略は一切許されません。些細な情報も含め、見つかったものは全てリストアップしてください。**
+            # コンテキストウィンドウに合わせて切り出し（Gemini 2.0 Flashは100万トークン対応なので大きめに）
+            # ただし、長すぎると出力生成（Output Token）がタイムアウトするため、文字数で一定の制限はかける
+            # 日本語で40万文字あれば、通常のリストページは十分入る
+            page_text = page_text[:400000]
 
-                【前提情報】
-                ・本日の日付: {today.strftime('%Y年%m月%d日')}
-                ・参照URL: {url}
-                
-                【テキスト内容（断片）】
-                {chunk_text}
+            prompt = f"""
+            あなたはデータスクレイピングの専門家です。
+            以下のWebページのテキストデータは、プレスリリースやイベント情報の「一覧リスト」です。
+            このリストに含まれる**全ての記事情報**を抽出し、JSON形式で出力してください。
 
-                【厳格な抽出ルール】
-                1. テキストに含まれる「イベント」「新商品」「キャンペーン」「展示会」などの情報を抽出する。
-                2. 日付は「YYYY年MM月DD日」形式。
-                3. 場所（lat, lon）は場所名から推測する。
-                4. 情報がテキスト内で完結していない（文中で切れている）場合は、無理に補完せず、確実な情報のみ抽出する。
-                5. 出力はJSONのみ。
+            【重要指令】
+            1. **「要約」や「抜粋」は禁止です。リストにある項目は、上から下まで全て抽出してください。**
+            2. 出力トークン制限（文字数制限）が許す限り、可能な限り多くの項目を出力してください。
+            3. PRTIMESやAtPressのようなサイトの場合、1ページに50件以上の情報が含まれる場合があります。それらを網羅してください。
 
-                【出力形式】
-                [
-                    {{
-                        "name": "イベント名",
-                        "place": "開催場所",
-                        "date_info": "期間",
-                        "description": "概要",
-                        "lat": 緯度(数値),
-                        "lon": 経度(数値)
-                    }}
-                ]
-                """
+            【前提情報】
+            ・本日の日付: {today.strftime('%Y年%m月%d日')}
+            ・参照URL: {url}
+            
+            【テキスト内容】
+            {page_text}
 
-                try:
-                    ai_response = client.models.generate_content(
-                        model="gemini-2.0-flash-exp",
-                        contents=prompt,
-                        config=types.GenerateContentConfig(
-                            response_mime_type="application/json", 
-                            temperature=0.0
-                        )
-                    )
+            【抽出項目とルール】
+            ・name: イベント名、または記事タイトル
+            ・place: 開催場所（記述がなければ、タイトル等から都道府県や施設名を推測。不明なら空欄）
+            ・date_info: 日付（YYYY年MM月DD日形式）
+            ・description: 概要（1行程度）
+            ・lat: 緯度(数値・推測)
+            ・lon: 経度(数値・推測)
+
+            【出力形式 (JSON List)】
+            [
+                {{ "name": "...", "place": "...", "date_info": "...", "description": "...", "lat": 0.0, "lon": 0.0 }},
+                ...
+            ]
+            """
+
+            # モデル設定: response_mime_typeでJSONを強制
+            ai_response = client.models.generate_content(
+                model="gemini-2.0-flash-exp",
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json", 
+                    temperature=0.0
+                )
+            )
+            
+            raw_json = ai_response.text.replace("```json", "").replace("```", "").strip()
+            extracted_list = json.loads(raw_json)
+            
+            if isinstance(extracted_list, list):
+                for item in extracted_list:
+                    # 重複チェック処理
+                    n_key = normalize_string(item.get('name', ''))
+                    p_key = normalize_string(item.get('place', ''))
                     
-                    # JSONパース
-                    raw_json = ai_response.text.replace("```json", "").replace("```", "").strip()
-                    extracted = json.loads(raw_json)
-                    if isinstance(extracted, list):
-                        chunk_results.extend(extracted)
-                        
-                except Exception as e:
-                    # 分割の一部が失敗しても全体を止めない
-                    print(f"Chunk error: {e}")
-                    continue
-                
-                time.sleep(1) # API制限回避用ウェイト
+                    is_in_csv = False
+                    if (n_key, p_key) in existing_fingerprints:
+                        is_in_csv = True
+                    elif p_key == "" and any(ef[0] == n_key for ef in existing_fingerprints):
+                        is_in_csv = True
+                    
+                    if is_in_csv:
+                        skipped_count_duplicate_csv += 1
+                        continue
 
-            chunk_progress.empty() # サブバー消去
-
-            # --- 分割結果の統合と重複チェック ---
-            seen_in_page = set()
+                    # 採用
+                    item['source_label'] = label
+                    item['source_url'] = url
+                    if item.get('date_info'):
+                        item['date_info'] = normalize_date(item['date_info'])
+                    all_data.append(item)
             
-            for item in chunk_results:
-                # ページ内での重複排除（Chunkのオーバーラップ対策）
-                n_key = normalize_string(item.get('name', ''))
-                if not n_key or n_key in seen_in_page:
-                    continue
-                seen_in_page.add(n_key)
-
-                # CSVとの重複チェック
-                p_key = normalize_string(item.get('place', ''))
-                
-                is_in_csv = False
-                if (n_key, p_key) in existing_fingerprints:
-                    is_in_csv = True
-                elif p_key == "" and any(ef[0] == n_key for ef in existing_fingerprints):
-                    is_in_csv = True
-                
-                if is_in_csv:
-                    skipped_count_duplicate_csv += 1
-                    continue
-
-                # 採用
-                item['source_label'] = label
-                item['source_url'] = url
-                if item.get('date_info'):
-                    item['date_info'] = normalize_date(item['date_info'])
-                all_data.append(item)
+            time.sleep(1)
 
         except Exception as e:
-            st.warning(f"スキップしました: {label} (エラー: {e})")
+            st.warning(f"読み込みエラー: {label} (エラー: {e})")
             continue
 
     progress_bar.progress(100)
@@ -277,18 +252,19 @@ if st.button("一括読み込み開始 (完全網羅モード)", type="primary")
     progress_bar.empty()
 
     if not all_data and skipped_count_duplicate_csv > 0:
-        st.warning(f"データは取得できましたが、全てアップロードされたCSVに含まれる「既知の情報」だったため、表示するものがありません。（除外数: {skipped_count_duplicate_csv}件）")
+        st.warning(f"取得データは全てCSVに含まれていました（除外数: {skipped_count_duplicate_csv}件）。")
         st.session_state.extracted_data = None
     elif not all_data:
-        st.error("情報が見つかりませんでした。")
+        st.error("情報が見つかりませんでした。Webサイトの構造が変わったか、アクセスが制限されている可能性があります。")
         st.session_state.extracted_data = None
     else:
-        # 最終的なリストの重複排除（念の為）
+        # 重複排除
         unique_data = []
         seen_keys = set()
         for item in all_data:
             name_key = normalize_string(item.get('name', ''))
             place_key = normalize_string(item.get('place', ''))
+            if not name_key: continue
             
             if (name_key, place_key) not in seen_keys:
                 seen_keys.add((name_key, place_key))
@@ -299,7 +275,7 @@ if st.button("一括読み込み開始 (完全網羅モード)", type="primary")
         
         msg = f"🎉 読み込み完了！ 新規 {len(unique_data)} 件"
         if skipped_count_duplicate_csv > 0:
-            msg += f" (CSVとの重複 {skipped_count_duplicate_csv} 件を除外しました)"
+            msg += f" (CSV重複除外: {skipped_count_duplicate_csv} 件)"
         status_text.success(msg)
 
 # --- 結果表示エリア ---
