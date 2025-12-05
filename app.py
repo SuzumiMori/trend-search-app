@@ -16,7 +16,7 @@ st.set_page_config(page_title="トレンド・イベント検索（多ページ�
 
 st.title("📖 イベント情報「全件網羅」抽出アプリ")
 st.markdown("""
-**AI × スマートクローリング**
+**AI × スマートクローリング（修正版）**
 Webページを読み込み、**「もっと見る」や「次へ」のリンクを自動で辿って**、奥にある記事まで抽出します。
 """)
 
@@ -42,12 +42,14 @@ def normalize_string(text):
 def safe_json_parse(json_str):
     """不完全なJSON文字列から、有効なオブジェクトのみを救出する"""
     if not json_str: return []
+    # コードブロック記号の削除
     json_str = json_str.replace("```json", "").replace("```", "").strip()
     
     try:
         return json.loads(json_str)
     except json.JSONDecodeError:
         try:
+            # 末尾が切れている場合の簡易修復
             last_brace_index = json_str.rfind("}")
             if last_brace_index == -1: return [] 
             repaired_json = json_str[:last_brace_index+1] + "]"
@@ -71,35 +73,39 @@ def find_next_page_url(soup, current_url):
     """
     next_url = None
     
-    # パターン1: ユーザー指定の特定クラス（優先）
-    target_btn = soup.select_one("a.js-list-article-more-button")
-    if target_btn and target_btn.get('href'):
-        next_url = target_btn['href']
-        
-    # パターン2: rel="next"
-    if not next_url:
-        link_next = soup.find("link", rel="next")
-        if link_next and link_next.get('href'):
-            next_url = link_next['href']
-
-    # パターン3: 一般的なページネーションクラス
-    if not next_url:
-        # "次へ", "Next", "More" を含むaタグ、または page-link などのクラス
-        candidates = soup.find_all("a", href=True)
-        for a in candidates:
-            text = a.get_text(strip=True)
-            cls = " ".join(a.get("class", []))
+    try:
+        # パターン1: ユーザー指定の特定クラス（優先）
+        target_btn = soup.select_one("a.js-list-article-more-button")
+        if target_btn and target_btn.get('href'):
+            next_url = target_btn['href']
             
-            # テキストやクラス名で判定
-            if "次へ" in text or "Next" in text or "more" in cls.lower() or "next" in cls.lower():
-                # 明らかにトップに戻るようなリンクは除外
-                if len(a['href']) > 2: 
-                    next_url = a['href']
-                    break
-    
-    if next_url:
-        # 相対パスを絶対パスに変換
-        return urllib.parse.urljoin(current_url, next_url)
+        # パターン2: rel="next"
+        if not next_url:
+            link_next = soup.find("link", rel="next")
+            if link_next and link_next.get('href'):
+                next_url = link_next['href']
+
+        # パターン3: 一般的なページネーションクラス
+        if not next_url:
+            candidates = soup.find_all("a", href=True)
+            for a in candidates:
+                text = a.get_text(strip=True)
+                # クラス取得時の安全策
+                cls_list = a.get("class", [])
+                cls = " ".join(cls_list).lower() if cls_list else ""
+                
+                # テキストやクラス名で判定
+                if "次へ" in text or "Next" in text or "more" in cls or "next" in cls:
+                    if len(a['href']) > 2: # 明らかにトップに戻る("#")などは除外
+                        next_url = a['href']
+                        break
+        
+        if next_url:
+            return urllib.parse.urljoin(current_url, next_url)
+            
+    except Exception as e:
+        print(f"Next URL logic error: {e}")
+        return None
     
     return None
 
@@ -131,7 +137,7 @@ with st.sidebar:
     
     st.markdown("---")
     st.header("2. 探索深度")
-    max_pages = st.slider("読み込む最大ページ数", 1, 10, 3, help="「もっと見る」を何回辿るか指定します。多いと時間がかかります。")
+    max_pages = st.slider("読み込む最大ページ数", 1, 10, 3, help="「もっと見る」を何回辿るか指定します。")
     
     st.markdown("---")
     st.markdown("### 3. 既存データ除外")
@@ -164,7 +170,6 @@ if st.button("一括読み込み開始", type="primary"):
         st.error("⚠️ APIキーが設定されていません。")
         st.stop()
 
-    # ターゲットリスト作成
     targets = []
     for label in selected_presets:
         targets.append({"url": PRESET_URLS[label], "label": label})
@@ -176,7 +181,6 @@ if st.button("一括読み込み開始", type="primary"):
                 domain = urllib.parse.urlparse(url).netloc
                 targets.append({"url": url, "label": f"カスタム ({domain})"})
     
-    # 重複URL削除
     unique_targets = {t['url']: t for t in targets}
     targets = list(unique_targets.values())
 
@@ -196,10 +200,9 @@ if st.button("一括読み込み開始", type="primary"):
     for idx, target in enumerate(targets):
         base_url = target['url']
         label = target['label']
-        
         current_url = base_url
         
-        # --- ページごとのループ (指定回数まで) ---
+        # --- ページごとのループ ---
         for page_num in range(1, max_pages + 1):
             
             progress_percent = (idx / len(targets)) + ((page_num / max_pages) / len(targets))
@@ -209,33 +212,35 @@ if st.button("一括読み込み開始", type="primary"):
             try:
                 headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/91.0.4472.124"}
                 response = requests.get(current_url, headers=headers, timeout=15)
-                response.encoding = response.apparent_encoding
                 
                 if response.status_code != 200:
-                    st.warning(f"アクセス不可: {current_url}")
+                    st.warning(f"アクセス不可 (Status: {response.status_code}): {current_url}")
                     break
 
                 soup = BeautifulSoup(response.text, "html.parser")
                 
-                # 次のページのURLを探しておく
+                # 次のページのURLを探す（エラーガード付き）
                 next_page_url = find_next_page_url(soup, current_url)
                 
                 # --- クリーニング ---
                 for tag in soup.find_all(["script", "style", "nav", "footer", "iframe", "header", "noscript", "svg"]):
                     tag.decompose()
                 
-                # メインコンテンツ以外を削除（ノイズ除去）
                 exclude = ['sidebar', 'ranking', 'recommend', 'widget', 'ad', 'bread']
                 for tag in soup.find_all(attrs={"class": True}):
                     if not tag: continue
-                    c_str = str(tag.get("class")).lower()
+                    # クラス名がない場合の安全処理
+                    cls_list = tag.get("class")
+                    if not cls_list: continue
+                    
+                    c_str = str(cls_list).lower()
                     if any(x in c_str for x in exclude):
                         tag.decompose()
                 
                 full_text = soup.get_text(separator="\n", strip=True)
                 chunks = list(split_text_into_chunks(full_text))
                 
-                # --- AI抽出 (チャンクごと) ---
+                # --- AI抽出 ---
                 for chunk in chunks:
                     if not chunk: continue
                     
@@ -274,39 +279,42 @@ if st.button("一括読み込み開始", type="primary"):
                         
                         if isinstance(extracted, list):
                             for item in extracted:
-                                if not item.get('name'): continue
+                                # ★修正ポイント: itemがNoneまたは辞書でない場合にスキップする安全装置★
+                                if not item or not isinstance(item, dict): 
+                                    continue
                                 
-                                # 重複チェック
+                                # 名前がないデータはスキップ
+                                if 'name' not in item or not item['name']:
+                                    continue
+                                
                                 n = normalize_string(item['name'])
                                 p = normalize_string(item.get('place', ''))
                                 
-                                # CSVとの重複確認
                                 if (n, p) in existing_fingerprints:
                                     skipped_count_duplicate_csv += 1
                                     continue
                                 
                                 item['source_label'] = label
-                                item['source_url'] = current_url # ページURLを保存
+                                item['source_url'] = current_url
                                 item['date_info'] = normalize_date(item.get('date_info', ''))
                                 all_data.append(item)
                                 
                     except Exception as e:
-                        print(f"AI Error: {e}")
-                        time.sleep(1)
+                        # チャンク解析のエラーは無視して次へ
+                        print(f"AI Chunk Error: {e}")
+                        continue
             
-                # 次のページがなければ終了、あればURL更新してループ継続
                 if not next_page_url:
                     break
                 current_url = next_page_url
-                time.sleep(1) # サーバー負荷軽減
+                time.sleep(1) 
                 
             except Exception as e:
-                st.warning(f"エラー発生: {e}")
+                st.warning(f"ページ読み込みエラー ({current_url}): {e}")
                 break
 
     main_progress.empty()
 
-    # --- 結果集計 ---
     if not all_data:
         if skipped_count_duplicate_csv > 0:
             st.warning(f"取得データは全てCSV内の既知情報でした。（除外: {skipped_count_duplicate_csv}件）")
@@ -314,7 +322,6 @@ if st.button("一括読み込み開始", type="primary"):
             st.error("情報が見つかりませんでした。")
         st.session_state.extracted_data = None
     else:
-        # 重複排除 (ページまたぎ等)
         unique_data = []
         seen = set()
         for d in all_data:
@@ -333,17 +340,22 @@ if st.session_state.extracted_data:
     
     st.markdown(f"**取得件数: {len(df)}**")
     
-    # 表示用加工
+    # 表示用
     display_df = df.rename(columns={
         'date_info': '期間', 'name': 'イベント名', 
         'place': '場所', 'description': '概要', 
         'source_label': '情報源', 'source_url': 'URL'
     })
     
-    # 期間でソート
     try:
         display_df = display_df.sort_values('期間')
     except: pass
+    
+    # 必要な列のみ抽出
+    cols = ['期间', 'イベント名', '場所', '概要', '情報源', 'URL']
+    # 実際に存在する列のみ使用
+    cols = [c for c in cols if c in display_df.columns]
+    display_df = display_df[cols]
 
     st.dataframe(
         display_df,
