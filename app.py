@@ -51,25 +51,17 @@ if 'last_update' not in st.session_state:
 with st.sidebar:
     st.header("1. 読み込み対象")
     
-    # 修正: PRTIMESを先頭に追加
+    # 修正: PRTIMESのみに変更
     PRESET_URLS = {
-        "PRTIMES (最新プレスリリース)": "https://prtimes.jp/",
-        "Walkerplus (今日のイベント/東京)": "https://www.walkerplus.com/event_list/today/ar0300/",
-        "Walkerplus (今週末のイベント/東京)": "https://www.walkerplus.com/event_list/weekend/ar0300/",
-        "Walkerplus (来週のイベント/東京)": "https://www.walkerplus.com/event_list/next_week/ar0300/",
-        "Let's Enjoy Tokyo (現在開催中/渋谷)": "https://www.enjoytokyo.jp/event/list/area1302/?date_type=current",
-        "Let's Enjoy Tokyo (今週末/渋谷)": "https://www.enjoytokyo.jp/event/list/area1302/?date_type=weekend",
-        "Fashion Press (最新ニュース)": "https://www.fashion-press.net/news/",
-        "TimeOut Tokyo (東京のイベント)": "https://www.timeout.jp/tokyo/ja/things-to-do"
+        "PRTIMES (最新プレスリリース)": "https://prtimes.jp/"
     }
     
     selected_presets = st.multiselect(
         "サイトを選択",
         options=list(PRESET_URLS.keys()),
-        default=["Walkerplus (今日のイベント/東京)", "Let's Enjoy Tokyo (現在開催中/渋谷)"]
+        default=["PRTIMES (最新プレスリリース)"]
     )
 
-    # 修正: カスタムURL入力をここに移動
     st.markdown("### 🔗 カスタムURL")
     custom_urls_text = st.text_area("その他のURL (1行に1つ)", height=100)
     
