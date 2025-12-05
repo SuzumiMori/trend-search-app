@@ -15,8 +15,8 @@ import re
 # ページの設定
 st.set_page_config(page_title="トレンド・イベント検索", page_icon="📖", layout="wide")
 
-st.title("📖 イベント情報「完全抽出」アプリ")
-st.markdown("Webページを読み込み、**手持ちのCSVにない新しい情報のみ**を抽出します。")
+st.title("📖 イベント情報「完全救出」抽出アプリ")
+st.markdown("Webページを読み込み、**手持ちのCSVにない新しい情報のみ**を抽出します。大量データ対応版。")
 
 # --- ユーティリティ関数 ---
 
@@ -30,14 +30,45 @@ def normalize_date(text):
     return text
 
 def normalize_string(text):
-    """
-    文字列比較用の正規化関数
-    """
+    """文字列比較用の正規化関数"""
     if not isinstance(text, str):
         return ""
     text = text.replace(" ", "").replace("　", "")
     text = text.replace("（", "").replace("）", "").replace("(", "").replace(")", "")
     return text.lower()
+
+def safe_json_parse(json_str):
+    """
+    不完全なJSON文字列から、有効なオブジェクトのみを救出してパースする関数。
+    Geminiが途中で回答を打ち切った場合(Unterminated string)に対応。
+    """
+    json_str = json_str.replace("```json", "").replace("```", "").strip()
+    
+    try:
+        # まず普通にパースを試みる
+        return json.loads(json_str)
+    except json.JSONDecodeError:
+        # 失敗した場合（途中で切れている場合）
+        # 文字列を後ろから探索し、最後の閉じ括弧 '}' を探す
+        try:
+            last_brace_index = json_str.rfind("}")
+            if last_brace_index == -1:
+                return [] # 有効なデータなし
+            
+            # 最後の '}' までを切り取り、リストの閉じ括弧 ']' を補完する
+            repaired_json = json_str[:last_brace_index+1] + "]"
+            return json.loads(repaired_json)
+        except:
+            return [] # 修復不可能なら空リスト
+
+def split_text_into_chunks(text, chunk_size=30000, overlap=2000):
+    """テキストをオーバーラップ付きで分割するジェネレータ"""
+    start = 0
+    text_len = len(text)
+    while start < text_len:
+        end = start + chunk_size
+        yield text[start:end]
+        start = end - overlap
 
 # --- Session State ---
 if 'extracted_data' not in st.session_state:
@@ -141,107 +172,102 @@ if st.button("一括読み込み開始", type="primary"):
 
             soup = BeautifulSoup(response.text, "html.parser")
             
-            # --- 【重要】徹底的なノイズ除去 ---
-            # 記事一覧以外の要素（ランキング、サイドバー、フッター、広告）をHTML構造から削除し、
-            # AIに渡すテキストを「メインコンテンツ」のみに絞り込む
-            
-            # 1. 基本的な不要タグ削除
+            # ノイズ除去
             for tag in soup(["script", "style", "nav", "footer", "iframe", "header", "noscript", "form", "svg"]):
                 tag.decompose()
             
-            # 2. クラス名やIDによる不要エリアの推定削除
-            # (PRTIMESやAtPressのサイドバーやランキングを除外してトークンを節約)
-            exclude_keywords = ['sidebar', 'side-bar', 'ranking', 'recommend', 'widget', 'advertisement', 'pankuzu', 'breadcrumb']
-            for tag in soup.find_all(attrs={"class": True}):
-                classes = tag.get("class")
-                if isinstance(classes, list):
-                    classes = " ".join(classes).lower()
-                if any(k in classes for k in exclude_keywords):
-                    tag.decompose()
+            # 本文取得
+            full_text = soup.get_text(separator="\n", strip=True)
             
-            for tag in soup.find_all(attrs={"id": True}):
-                ids = tag.get("id").lower()
-                if any(k in ids for k in exclude_keywords):
-                    tag.decompose()
-
-            # --- テキスト抽出 ---
-            # separator="\n" を指定することで、記事タイトルと日付などがくっつくのを防ぐ
-            page_text = soup.get_text(separator="\n", strip=True)
+            # --- 分割処理 (Chunking) + 自動修復 ---
+            # 30,000文字ごとに分割してリクエストを送る
+            chunks = list(split_text_into_chunks(full_text, chunk_size=30000, overlap=1000))
             
-            # コンテキストウィンドウに合わせて切り出し（Gemini 2.0 Flashは100万トークン対応なので大きめに）
-            # ただし、長すぎると出力生成（Output Token）がタイムアウトするため、文字数で一定の制限はかける
-            # 日本語で40万文字あれば、通常のリストページは十分入る
-            page_text = page_text[:400000]
-
-            prompt = f"""
-            あなたはデータスクレイピングの専門家です。
-            以下のWebページのテキストデータは、プレスリリースやイベント情報の「一覧リスト」です。
-            このリストに含まれる**全ての記事情報**を抽出し、JSON形式で出力してください。
-
-            【重要指令】
-            1. **「要約」や「抜粋」は禁止です。リストにある項目は、上から下まで全て抽出してください。**
-            2. 出力トークン制限（文字数制限）が許す限り、可能な限り多くの項目を出力してください。
-            3. PRTIMESやAtPressのようなサイトの場合、1ページに50件以上の情報が含まれる場合があります。それらを網羅してください。
-
-            【前提情報】
-            ・本日の日付: {today.strftime('%Y年%m月%d日')}
-            ・参照URL: {url}
+            chunk_results = []
             
-            【テキスト内容】
-            {page_text}
+            chunk_progress = st.progress(0)
+            for cid, chunk_text in enumerate(chunks):
+                chunk_progress.progress((cid + 1) / len(chunks))
+                
+                prompt = f"""
+                あなたはデータ抽出の専門家です。
+                以下のテキスト（Webページの断片）から、含まれる「全ての」記事・イベント情報をJSONリストで抽出してください。
+                
+                【重要: エラー回避のため】
+                リストがあまりに長くなると出力が切れてしまうため、**テキスト内で見つかった順に最大30件まで**抽出して出力してください。
+                （次の断片で続きを処理するので、無理に全部詰め込まなくて大丈夫です）
 
-            【抽出項目とルール】
-            ・name: イベント名、または記事タイトル
-            ・place: 開催場所（記述がなければ、タイトル等から都道府県や施設名を推測。不明なら空欄）
-            ・date_info: 日付（YYYY年MM月DD日形式）
-            ・description: 概要（1行程度）
-            ・lat: 緯度(数値・推測)
-            ・lon: 経度(数値・推測)
+                【前提情報】
+                ・本日の日付: {today.strftime('%Y年%m月%d日')}
+                ・参照URL: {url}
+                
+                【テキスト内容】
+                {chunk_text}
 
-            【出力形式 (JSON List)】
-            [
-                {{ "name": "...", "place": "...", "date_info": "...", "description": "...", "lat": 0.0, "lon": 0.0 }},
-                ...
-            ]
-            """
+                【出力形式 (JSON List)】
+                [
+                    {{
+                        "name": "イベント名または記事タイトル",
+                        "place": "場所(なければ空欄)",
+                        "date_info": "日付(YYYY年MM月DD日)",
+                        "description": "概要(1行)",
+                        "lat": 0.0,
+                        "lon": 0.0
+                    }}
+                ]
+                """
 
-            # モデル設定: response_mime_typeでJSONを強制
-            ai_response = client.models.generate_content(
-                model="gemini-2.0-flash-exp",
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    response_mime_type="application/json", 
-                    temperature=0.0
-                )
-            )
-            
-            raw_json = ai_response.text.replace("```json", "").replace("```", "").strip()
-            extracted_list = json.loads(raw_json)
-            
-            if isinstance(extracted_list, list):
-                for item in extracted_list:
-                    # 重複チェック処理
-                    n_key = normalize_string(item.get('name', ''))
-                    p_key = normalize_string(item.get('place', ''))
+                try:
+                    ai_response = client.models.generate_content(
+                        model="gemini-2.0-flash-exp",
+                        contents=prompt,
+                        config=types.GenerateContentConfig(
+                            response_mime_type="application/json", 
+                            temperature=0.0
+                        )
+                    )
                     
-                    is_in_csv = False
-                    if (n_key, p_key) in existing_fingerprints:
-                        is_in_csv = True
-                    elif p_key == "" and any(ef[0] == n_key for ef in existing_fingerprints):
-                        is_in_csv = True
+                    # ★ここでエラー修復関数を通す
+                    extracted = safe_json_parse(ai_response.text)
                     
-                    if is_in_csv:
-                        skipped_count_duplicate_csv += 1
-                        continue
+                    if isinstance(extracted, list):
+                        chunk_results.extend(extracted)
+                        
+                except Exception as e:
+                    print(f"Chunk error: {e}")
+                    continue
+                
+                time.sleep(1) # APIレート制限対策
 
-                    # 採用
-                    item['source_label'] = label
-                    item['source_url'] = url
-                    if item.get('date_info'):
-                        item['date_info'] = normalize_date(item['date_info'])
-                    all_data.append(item)
+            chunk_progress.empty()
+
+            # --- 結果の統合と重複チェック ---
+            seen_in_page = set()
             
-            time.sleep(1)
+            for item in chunk_results:
+                # ページ内重複排除
+                n_key = normalize_string(item.get('name', ''))
+                if not n_key or n_key in seen_in_page:
+                    continue
+                seen_in_page.add(n_key)
+
+                # CSV重複チェック
+                p_key = normalize_string(item.get('place', ''))
+                is_in_csv = False
+                if (n_key, p_key) in existing_fingerprints:
+                    is_in_csv = True
+                elif p_key == "" and any(ef[0] == n_key for ef in existing_fingerprints):
+                    is_in_csv = True
+                
+                if is_in_csv:
+                    skipped_count_duplicate_csv += 1
+                    continue
+
+                item['source_label'] = label
+                item['source_url'] = url
+                if item.get('date_info'):
+                    item['date_info'] = normalize_date(item['date_info'])
+                all_data.append(item)
 
         except Exception as e:
             st.warning(f"読み込みエラー: {label} (エラー: {e})")
@@ -252,19 +278,18 @@ if st.button("一括読み込み開始", type="primary"):
     progress_bar.empty()
 
     if not all_data and skipped_count_duplicate_csv > 0:
-        st.warning(f"取得データは全てCSVに含まれていました（除外数: {skipped_count_duplicate_csv}件）。")
+        st.warning(f"データは取得できましたが、全てアップロードされたCSVに含まれる「既知の情報」でした。（除外数: {skipped_count_duplicate_csv}件）")
         st.session_state.extracted_data = None
     elif not all_data:
-        st.error("情報が見つかりませんでした。Webサイトの構造が変わったか、アクセスが制限されている可能性があります。")
+        st.error("情報が見つかりませんでした。")
         st.session_state.extracted_data = None
     else:
-        # 重複排除
+        # 最終重複排除
         unique_data = []
         seen_keys = set()
         for item in all_data:
             name_key = normalize_string(item.get('name', ''))
             place_key = normalize_string(item.get('place', ''))
-            if not name_key: continue
             
             if (name_key, place_key) not in seen_keys:
                 seen_keys.add((name_key, place_key))
