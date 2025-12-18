@@ -411,12 +411,12 @@ if st.button("一括読み込み開始", type="primary"):
     # API key
     api_key = None
     try:
-        api_key = st.secrets["GOOGLE_API_KEY"]
+        api_key = st.secrets["GEMINI_API_KEY"]
     except Exception:
-        api_key = os.environ.get("GOOGLE_API_KEY")
+        api_key = os.environ.get("GEMINI_API_KEY")
 
     if not api_key:
-        st.error("⚠️ GOOGLE_API_KEY が設定されていません（st.secrets または環境変数）。")
+        st.error("⚠️ GEMINI_API_KEY が設定されていません（st.secrets または環境変数）。")
         st.stop()
 
     # targets
